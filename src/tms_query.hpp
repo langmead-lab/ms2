@@ -23,6 +23,7 @@
 #include "tms_index.hpp"
 #include "step_stats.hpp"
 #include "ftab.hpp"
+#include "reposition_oracle.hpp"
 #include <algorithm>
 #include <array>
 #include <limits>
@@ -157,7 +158,19 @@ enum class TmsMode {
     PHI,      // walk phi across the rows between, reading PLCP
     PHISKIP,  // psi if the match length is below the row distance, else phi
     DUAL,     // psi if the match length is below the row distance, else both, first to finish wins
+    ORACLE,   // replay recorded outcomes: no candidate scan and no LCE (see RepositionOracle)
+    ORACLE_SCAN,  // replay recorded outcomes' side and LCE, but scan that side for the candidate
 };
+
+namespace tms_detail {
+// Per-pattern oracle state of the batched engine, as a base of its slot so
+// that it takes no room when neither recording nor replaying.
+struct NoOracleSlot {};
+struct ReplaySlot { const RepositionDecision *orc, *orc_end; };
+// ORACLE_SCAN also keeps the outcome being replayed while its side is scanned.
+struct ReplayScanSlot : ReplaySlot { RepositionDecision orc_now; };
+struct RecordSlot { std::vector<RepositionDecision>* rec; };
+}  // namespace tms_detail
 
 /** The position reported with a statistic of 0 (an absent character). */
 constexpr ulint TMS_NO_POS = std::numeric_limits<ulint>::max();
@@ -195,16 +208,35 @@ constexpr ulint TMS_NO_POS = std::numeric_limits<ulint>::max();
  * whose last k-mer occurs starts from the table's state, k steps in; a
  * mode that walks phi, or positions, needs a table with a toehold, and
  * positions need its window positions.
+ *
+ * With Record, (*record)[j] receives every reposition outcome of patterns[j]
+ * in order.  ORACLE replays such outcomes from *replay instead of scanning
+ * for the candidates and computing their LCEs: on a mismatch it takes the
+ * next recorded interval and length, prefetches that interval's LF rows,
+ * and on the next visit moves there as the other modes do once they have
+ * chosen, so it reads only LF (and phi for positions).  ORACLE_SCAN replays
+ * the same outcomes with less given: the side is whichever of pred and succ
+ * the recorded interval lies on, and that side alone is scanned for the
+ * candidate as the other modes scan it.  The recorded length still stands in
+ * for the LCE.  The interval the scan finds must be the recorded one.
+ * Recording and replaying take no ftab, since a table skips the
+ * repositions of a pattern's last k characters.
  */
-template <TmsMode Mode, bool Positions, bool PhiStarts, class Access>
+template <TmsMode Mode, bool Positions, bool PhiStarts, bool Record, class Access>
 inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vector<std::string>& patterns, size_t k,
                                  std::vector<std::vector<ulint>>& out_len,
-                                 std::vector<std::vector<ulint>>* out_pos, const ftab::Ftab* ft = nullptr) {
+                                 std::vector<std::vector<ulint>>* out_pos, const ftab::Ftab* ft = nullptr,
+                                 const RepositionOracleView* replay = nullptr,
+                                 std::vector<std::vector<RepositionDecision>>* record = nullptr) {
     using LFPos = TmsIndex::LFPos;
     using FLPos = TmsIndex::FLPos;
     using PhiPos = TmsIndex::PhiPosOf<PhiStarts>;
     static_assert(PhiStarts || !Positions, "positions need phi's starts-based form");
-    constexpr bool Toehold = Positions || Mode != TmsMode::PSI;
+    constexpr bool ReplayScan = Mode == TmsMode::ORACLE_SCAN;
+    constexpr bool Replay = Mode == TmsMode::ORACLE || ReplayScan;
+    constexpr bool Scans = !Replay || ReplayScan;
+    static_assert(!(Replay && Record), "the oracle mode replays outcomes rather than recording them");
+    constexpr bool Toehold = Positions || (Mode != TmsMode::PSI && !Replay);
     constexpr ulint INF = std::numeric_limits<ulint>::max();
     enum : uint8_t { STEP, SCAN, WALK, PRED_POS };
     struct Side {
@@ -217,7 +249,11 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
         bool psi_on, phi_on, done, lost;
         bool active() const { return !done && !lost; }
     };
-    struct Slot {
+    using OracleSlot = std::conditional_t<
+        ReplayScan, tms_detail::ReplayScanSlot,
+        std::conditional_t<Replay, tms_detail::ReplaySlot,
+                           std::conditional_t<Record, tms_detail::RecordSlot, tms_detail::NoOracleSlot>>>;
+    struct Slot : OracleSlot {
         const char* pat;
         ulint* ms;
         ulint* ms_pos;
@@ -251,6 +287,7 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
     }
     out_len.resize(patterns.size());
     if constexpr (Positions) out_pos->resize(patterns.size());
+    if constexpr (Record) record->resize(patterns.size());
     if (k == 0) k = 1;
     PhiPos init_ph{};
     if constexpr (Toehold) init_ph = idx.resolve_phi(idx.template phi_at_head<PhiStarts>(0));
@@ -276,8 +313,14 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
             const size_t j = next++;
             out_len[j].assign(patterns[j].size(), 0);
             if constexpr (Positions) (*out_pos)[j].assign(patterns[j].size(), TMS_NO_POS);
+            if constexpr (Record) (*record)[j].clear();
             if (patterns[j].empty()) continue;
             s = Slot{};
+            if constexpr (Replay) {
+                s.orc = replay->decisions + replay->offsets[j];
+                s.orc_end = replay->decisions + replay->offsets[j + 1];
+            }
+            if constexpr (Record) s.rec = &(*record)[j];
             s.pat = patterns[j].data();
             s.ms = out_len[j].data();
             if constexpr (Positions) s.ms_pos = (*out_pos)[j].data();
@@ -334,7 +377,7 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
         x.phi_min = INF;
         x.phi_left = dist;
     };
-    constexpr bool PsiWalks = Mode != TmsMode::PHI, PhiWalks = Mode != TmsMode::PSI;
+    constexpr bool PsiWalks = Mode != TmsMode::PHI && !Replay, PhiWalks = Mode != TmsMode::PSI && !Replay;
     auto step_side = [&](Side& x, const char* rest, ulint cap) {
         if (PsiWalks && x.psi_on) {
             TMS_COUNT(psi_steps, 1);
@@ -404,6 +447,62 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
                     s.ms[s.i - 1] = s.len = 0;
                     s.pos = pos;
                     advanced = true;
+                } else if constexpr (Replay) {
+                    // The recorded outcome stands in for the scan and the
+                    // LCE walks; the move to it is finished on the next visit.
+                    if (s.orc == s.orc_end)
+                        throw std::runtime_error("the oracle has fewer repositions for a pattern than its query makes");
+                    const RepositionDecision o = *s.orc++;
+                    const ulint cur = pos.interval, v = o.interval;
+                    if (v == cur || v > last_run || o.len > s.len)
+                        throw std::runtime_error("an oracle decision does not fit the query; was it recorded "
+                                                 "on this index and these patterns?");
+                    if constexpr (ReplayScan) {
+                        // Scan only the side the recorded interval is on,
+                        // as the SCAN state does for both sides otherwise.
+                        s.orc_now = o;
+                        s.u = s.d = cur;
+                        s.found_up = s.found_down = false;
+                        s.dist_up = pos.offset + 1;
+                        s.dist_down = acc.length(r) - pos.offset;
+                        if (v < cur) {
+                            s.lo = cur > rep_window ? cur - rep_window : 0;
+                            s.hi = cur;
+                            acc.prefetch_rows(s.lo, cur - 1);
+                            s.scanned_up = false;
+                            s.scanned_down = true;
+                        } else {
+                            s.lo = cur;
+                            s.hi = std::min(cur + rep_window, last_run);
+                            acc.prefetch_rows(cur + 1, s.hi);
+                            s.scanned_up = true;
+                            s.scanned_down = false;
+                        }
+                        s.pos = pos;
+                        s.state = SCAN;
+                    } else {
+                        TMS_COUNT(repositions, 1);
+                        TMS_COUNT(len_at_rep, s.len);
+                        s.up = Side{};
+                        s.down = Side{};
+                        if (v < cur) {
+                            s.u = v;
+                            s.up.done = true;
+                            s.up.value = o.len;
+                            s.down.lost = true;
+                            // Row v's length gives its tail, and with positions
+                            // row v + 1's phi point gives the tail's.
+                            acc.prefetch_rows(v, Toehold ? v + 1 : v);
+                        } else {
+                            s.d = v;
+                            s.down.done = true;
+                            s.down.value = o.len;
+                            s.up.lost = true;
+                            acc.prefetch(v);
+                    }
+                    s.pos = pos;
+                    s.state = WALK;
+                    }
                 } else {
                     const ulint cur = pos.interval;
                     s.u = s.d = cur;
@@ -426,7 +525,8 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
                 advanced = true;
             } else {
                 const ulint cap = s.len;
-                if (s.state == SCAN) {
+                bool chosen_now = false;  // ORACLE_SCAN: the scan just ended; the move waits a visit
+                if (Scans && s.state == SCAN) {
                     // Scan only rows prefetched on an earlier visit; a side
                     // that runs out of them prefetches more and yields.
                     TMS_COUNT(scan_visits, 1);
@@ -461,47 +561,72 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
                     TMS_COUNT(repositions, 1);
                     TMS_COUNT(scan_rows, s.d - s.u);
                     TMS_COUNT(len_at_rep, cap);
-                    TMS_COUNT(dist, std::min(found_up ? dist_up : INF, found_down ? dist_down : INF));
-                    TMS_COUNT(dist1, (found_up && dist_up == 1) || (found_down && dist_down == 1));
-                    s.up = Side{};
-                    s.down = Side{};
-                    s.up.lost = !found_up;
-                    s.down.lost = !found_down;
-                    if (cap == 0) {
-                        // Both LCEs cap at 0; take pred if there is one.
-                        s.up.done = found_up;
-                        s.down.done = found_down;
-                        s.up.value = s.down.value = 0;
+                    if constexpr (ReplayScan) {
+                        // The scanned side's candidate takes the recorded
+                        // length, and the move to it is finished on the next
+                        // visit, as in ORACLE.
+                        const RepositionDecision o = s.orc_now;
+                        const bool up = o.interval < s.pos.interval;
+                        if (!(up ? found_up && s.u == o.interval : found_down && s.d == o.interval))
+                            throw std::runtime_error("the scan found another candidate than the oracle recorded; "
+                                                     "was it recorded on this index and these patterns?");
+                        s.up = Side{};
+                        s.down = Side{};
+                        if (up) {
+                            s.up.done = true;
+                            s.up.value = o.len;
+                            s.down.lost = true;
+                            acc.prefetch_rows(s.u, Toehold ? s.u + 1 : s.u);
+                        } else {
+                            s.down.done = true;
+                            s.down.value = o.len;
+                            s.up.lost = true;
+                        }
+                        s.state = WALK;
+                        chosen_now = true;
                     } else {
-                        if (found_up) {
-                            setup(s.up, dist_up, cap);
-                            if (s.up.psi_on) { s.up.q = acc.psi_at_tail(s.u); acc.prefetch_psi(s.up.q.interval); }
-                            if (s.up.phi_on) s.up.p = s.ph;  // the current row is the lower one
-                        }
-                        if (found_down) {
-                            setup(s.down, dist_down, cap);
-                            if (s.down.psi_on) {
-                                // Row d and the row below it, which the
-                                // reads that follow from row d often reach.
-                                s.down.q = acc.psi_at_head(s.d);
-                                acc.prefetch_psi(s.down.q.interval);
-                                if (s.d < last_run) acc.prefetch_psi(s.d + 1);
+                        TMS_COUNT(dist, std::min(found_up ? dist_up : INF, found_down ? dist_down : INF));
+                        TMS_COUNT(dist1, (found_up && dist_up == 1) || (found_down && dist_down == 1));
+                        s.up = Side{};
+                        s.down = Side{};
+                        s.up.lost = !found_up;
+                        s.down.lost = !found_down;
+                        if (cap == 0) {
+                            // Both LCEs cap at 0; take pred if there is one.
+                            s.up.done = found_up;
+                            s.down.done = found_down;
+                            s.up.value = s.down.value = 0;
+                        } else {
+                            if (found_up) {
+                                setup(s.up, dist_up, cap);
+                                if (s.up.psi_on) { s.up.q = acc.psi_at_tail(s.u); acc.prefetch_psi(s.up.q.interval); }
+                                if (s.up.phi_on) s.up.p = s.ph;  // the current row is the lower one
                             }
-                            if (s.down.phi_on) {
-                                s.down.p = idx.template phi_at_head<PhiStarts>(s.d);
-                                idx.template prefetch_phi<PhiStarts>(s.down.p.interval);
+                            if (found_down) {
+                                setup(s.down, dist_down, cap);
+                                if (s.down.psi_on) {
+                                    // Row d and the row below it, which the
+                                    // reads that follow from row d often reach.
+                                    s.down.q = acc.psi_at_head(s.d);
+                                    acc.prefetch_psi(s.down.q.interval);
+                                    if (s.d < last_run) acc.prefetch_psi(s.d + 1);
+                                }
+                                if (s.down.phi_on) {
+                                    s.down.p = idx.template phi_at_head<PhiStarts>(s.d);
+                                    idx.template prefetch_phi<PhiStarts>(s.down.p.interval);
+                                }
                             }
                         }
+                        if constexpr (Toehold) {
+                            // Rows the new toehold is read from, whichever side wins.
+                            if (found_up)
+                                idx.template prefetch_phi<PhiStarts>(idx.template phi_at_head<PhiStarts>(s.u + 1).interval);
+                            if (found_down)
+                                idx.template prefetch_phi<PhiStarts>(idx.template phi_at_head<PhiStarts>(s.d).interval);
+                        }
+                        s.state = WALK;
                     }
-                    if constexpr (Toehold) {
-                        // Rows the new toehold is read from, whichever side wins.
-                        if (found_up)
-                            idx.template prefetch_phi<PhiStarts>(idx.template phi_at_head<PhiStarts>(s.u + 1).interval);
-                        if (found_down)
-                            idx.template prefetch_phi<PhiStarts>(idx.template phi_at_head<PhiStarts>(s.d).interval);
-                    }
-                    s.state = WALK;
-                } else {
+                } else if constexpr (!Replay) {
                     const char* rest = s.pat + s.i;
                     TMS_COUNT(walk_visits, 1);
                     if (s.up.active()) step_side(s.up, rest, cap);
@@ -515,13 +640,13 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
                         if (s.down.active()) step_side(s.down, rest, cap);
                     }
                 }
-                if constexpr (Mode != TmsMode::PSI) {
+                if constexpr (Mode != TmsMode::PSI && !Replay) {
                     if (!s.up.lost && !s.down.lost) {
                         if (upper(s.down, cap) <= lower(s.up)) s.down.lost = true;
                         else if (upper(s.up, cap) < lower(s.down)) s.up.lost = true;
                     }
                 }
-                if (!s.up.active() && !s.down.active()) {
+                if (!chosen_now && !s.up.active() && !s.down.active()) {
                     TMS_COUNT(lce, std::max(s.up.done ? s.up.value : 0, s.down.done ? s.down.value : 0));
                     TMS_COUNT(lce_capped, (s.up.done && s.up.value == cap) || (s.down.done && s.down.value == cap));
                     LFPos from{};
@@ -529,6 +654,7 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
                         from.interval = s.u + 1;
                         from = idx.up(from);
                         s.len = s.up.value;
+                        if constexpr (Record) s.rec->push_back(RepositionDecision{s.u, s.len});
                         if constexpr (Toehold) {
                             // The tail's text position is one phi step from
                             // the next interval head's.
@@ -544,6 +670,7 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
                         from.interval = s.d - 1;
                         from = idx.down(from);
                         s.len = s.down.value;
+                        if constexpr (Record) s.rec->push_back(RepositionDecision{s.d, s.len});
                         if constexpr (Toehold) s.ph = idx.resolve_phi(idx.template phi_at_head<PhiStarts>(s.d));
                         consume(s, start_LF(from));
                         advanced = true;
@@ -554,6 +681,10 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
             // Before start() files this pattern and begins the next.
             probe.record();
 #endif
+            if constexpr (Replay) {
+                if (advanced && s.i == 1 && s.orc != s.orc_end)
+                    throw std::runtime_error("the oracle has more repositions for a pattern than its query makes");
+            }
             if (!advanced || --s.i > 0 || start(s)) ++sp;
             else s = *--end;
         }
@@ -566,39 +697,62 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
 /**
  * tms_query_batch_impl with the mode and positions chosen at run time.  Rows
  * are read through packed access when the index's column widths allow it
- * and packed is true, else through column access.
+ * and packed is true, else through column access.  With record, the
+ * reposition outcomes are recorded there (any mode but ORACLE); ORACLE
+ * replays them from replay, which must be recorded on an index with the
+ * same LF intervals, for the same patterns.
  */
 inline void tms_query_batch(TmsIndex& idx, const std::vector<std::string>& patterns, size_t k,
                             std::vector<std::vector<ulint>>& out_len,
                             TmsMode mode = TmsMode::PSI, std::vector<std::vector<ulint>>* out_pos = nullptr,
-                            bool packed = true, const ftab::Ftab* ft = nullptr) {
-    if ((mode != TmsMode::PSI || out_pos) && !idx.has_phi())
+                            bool packed = true, const ftab::Ftab* ft = nullptr, const RepositionOracleView* replay = nullptr,
+                            std::vector<std::vector<RepositionDecision>>* record = nullptr) {
+    const bool oracle = mode == TmsMode::ORACLE || mode == TmsMode::ORACLE_SCAN;
+    if (((mode != TmsMode::PSI && !oracle) || out_pos) && !idx.has_phi())
         throw std::invalid_argument("this mode or positions need an index built with phi");
     if (out_pos && !idx.has_phi_starts())
         throw std::invalid_argument("positions need phi's starts-based form, which this index was loaded without");
-    if (mode != TmsMode::PHI && !idx.has_psi()) throw std::invalid_argument("this mode needs an index with psi");
+    if (mode != TmsMode::PHI && !oracle && !idx.has_psi()) throw std::invalid_argument("this mode needs an index with psi");
+    if (ft && (oracle || record))
+        throw std::invalid_argument("recording or replaying repositions takes no ftab, which skips some of them");
     if (ft && (mode != TmsMode::PSI || out_pos) && !ft->has_toehold())
         throw std::invalid_argument("this mode or positions need an ftab with a toehold");
     if (ft && out_pos && !ft->has_window()) throw std::invalid_argument("positions need an ftab with window positions");
-    auto run = [&](auto m) {
+    if (oracle && !replay) throw std::invalid_argument("the oracle mode needs recorded repositions to replay");
+    if (!oracle && replay) throw std::invalid_argument("only the oracle mode replays recorded repositions");
+    if (oracle && record) throw std::invalid_argument("the oracle mode cannot record repositions");
+    if (oracle && replay->move_runs != idx.move_runs())
+        throw std::invalid_argument("the oracle was recorded on an index with other LF intervals");
+    auto run = [&](auto m, auto rec) {
         constexpr TmsMode M = decltype(m)::value;
+        constexpr bool R = decltype(rec)::value;
         auto with = [&](const auto acc) {
             // Without positions, phi's lengths-based form when present: its
-            // rows are narrower.
-            if (out_pos) tms_query_batch_impl<M, true, true>(idx, acc, patterns, k, out_len, out_pos, ft);
+            // rows are narrower.  The oracle mode reads phi only for positions.
+            if (out_pos) tms_query_batch_impl<M, true, true, R>(idx, acc, patterns, k, out_len, out_pos, ft, replay, record);
+            else if constexpr (M == TmsMode::ORACLE || M == TmsMode::ORACLE_SCAN)
+                tms_query_batch_impl<M, false, true, R>(idx, acc, patterns, k, out_len, nullptr, ft, replay, record);
             else if (idx.has_phi_lengths())
-                tms_query_batch_impl<M, false, false>(idx, acc, patterns, k, out_len, nullptr, ft);
-            else tms_query_batch_impl<M, false, true>(idx, acc, patterns, k, out_len, nullptr, ft);
+                tms_query_batch_impl<M, false, false, R>(idx, acc, patterns, k, out_len, nullptr, ft, replay, record);
+            else tms_query_batch_impl<M, false, true, R>(idx, acc, patterns, k, out_len, nullptr, ft, replay, record);
         };
         const TmsIndex::PackedAccess pa = idx.packed_access();
         if (packed && pa.fits()) with(pa);
         else with(idx.column_access());
     };
+    auto run_rec = [&](auto m) {
+        if (record) run(m, std::true_type{});
+        else run(m, std::false_type{});
+    };
     switch (mode) {
-        case TmsMode::PSI: run(std::integral_constant<TmsMode, TmsMode::PSI>{}); break;
-        case TmsMode::PHI: run(std::integral_constant<TmsMode, TmsMode::PHI>{}); break;
-        case TmsMode::PHISKIP: run(std::integral_constant<TmsMode, TmsMode::PHISKIP>{}); break;
-        case TmsMode::DUAL: run(std::integral_constant<TmsMode, TmsMode::DUAL>{}); break;
+        case TmsMode::PSI: run_rec(std::integral_constant<TmsMode, TmsMode::PSI>{}); break;
+        case TmsMode::PHI: run_rec(std::integral_constant<TmsMode, TmsMode::PHI>{}); break;
+        case TmsMode::PHISKIP: run_rec(std::integral_constant<TmsMode, TmsMode::PHISKIP>{}); break;
+        case TmsMode::DUAL: run_rec(std::integral_constant<TmsMode, TmsMode::DUAL>{}); break;
+        case TmsMode::ORACLE: run(std::integral_constant<TmsMode, TmsMode::ORACLE>{}, std::false_type{}); break;
+        case TmsMode::ORACLE_SCAN:
+            run(std::integral_constant<TmsMode, TmsMode::ORACLE_SCAN>{}, std::false_type{});
+            break;
     }
 }
 

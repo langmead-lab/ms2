@@ -9,6 +9,7 @@ ms2 also compiles against Orbit (https://github.com/drnatebrown/orbit), a submod
 ms2's psi and phi query engine follows TeraTools (https://github.com/ucfcbb/TeraTools) by Ahsan Sanaullah, Shaojie Zhang and the S. Zhang Lab at UCF.
 
 - `src/tms_query.hpp`: the psi LCE, the reposition with its predecessor and successor scans, and the matching statistics loop follow `psi_lce`, `reposition_explicit` and `TeraIndex::ms_psi` in TeraTools' `src/include/TeraIndex/TeraIndex.h`.
+- `src/reposition_oracle.hpp`: the oracle repositioning modes, which record and replay each reposition's outcome, follow TeraMS's `ms_oracle`.
 
 ```
 MIT License
