@@ -33,3 +33,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## ropebwt3
+
+`src/tools/fmd2rlbwt/rld0.c` and `src/tools/fmd2rlbwt/rld0.h` are copied from ropebwt3 (https://github.com/lh3/ropebwt3) by Heng Li, under the MIT license, copyright (c) 2024- Dana-Farber Cancer Institute. The full text is in `src/tools/fmd2rlbwt/LICENSE.ropebwt3`.
