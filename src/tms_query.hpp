@@ -22,6 +22,7 @@
 
 #include "tms_index.hpp"
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <stdexcept>
 #include <type_traits>
@@ -29,8 +30,16 @@
 #include <string>
 #include <vector>
 
+#ifndef TMS_REP_WINDOW
+#define TMS_REP_WINDOW 8
+#endif
+#ifndef TMS_SCAN_EXTEND
+#define TMS_SCAN_EXTEND 16
+#endif
+
 #ifdef TMS_STATS
-struct TmsStats { ulint bases = 0, repositions = 0, psi_steps = 0, phi_steps = 0, scan_rows = 0, dist = 0, len_at_rep = 0, lce = 0, lce_capped = 0, dist1 = 0; };
+struct TmsStats { ulint bases = 0, repositions = 0, psi_steps = 0, phi_steps = 0, scan_rows = 0, dist = 0, len_at_rep = 0, lce = 0, lce_capped = 0, dist1 = 0,
+                  lf_ff = 0, lf_steps = 0, scan_visits = 0, walk_visits = 0; };
 inline TmsStats tms_stats;
 #define TMS_COUNT(field, v) (tms_stats.field += (v))
 #else
@@ -46,9 +55,11 @@ inline TmsStats tms_stats;
  */
 inline ulint tms_psi_lce(TmsIndex& idx, TmsIndex::FLPos q, const char* pat, size_t m, ulint cap) {
     ulint lce = 0;
-    while (lce < cap && lce < m && idx.psi_character(q) == static_cast<uchar>(pat[lce])) {
-        if (++lce == cap) break;
-        q = idx.psi(q);
+    while (lce < cap && lce < m) {
+        uchar c;
+        const TmsIndex::FLPos next = idx.psi_step(q, c);
+        if (c != static_cast<uchar>(pat[lce]) || ++lce == cap) break;
+        q = next;
         TMS_COUNT(psi_steps, 1);
     }
     return lce;
@@ -160,13 +171,14 @@ constexpr ulint TMS_NO_POS = std::numeric_limits<ulint>::max();
  * mode therefore chooses the same candidate, and the lengths and positions
  * do not depend on the mode or on k.
  *
- * out_len[j] receives the statistics for patterns[j]; if positions is true,
+ * Rows are read through the row access acc (TmsIndex::PackedAccess or
+ * ColumnAccess).  out_len[j] receives the statistics for patterns[j]; if positions is true,
  * out_pos[j] receives for each one a text position where it occurs
  * (TMS_NO_POS with a statistic of 0).  PHI, PHISKIP, DUAL and positions need
  * an index with phi.
  */
-template <TmsMode Mode, bool Positions>
-inline void tms_query_batch_impl(TmsIndex& idx, const std::vector<std::string>& patterns, size_t k,
+template <TmsMode Mode, bool Positions, class Access>
+inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vector<std::string>& patterns, size_t k,
                                  std::vector<std::vector<ulint>>& out_len,
                                  std::vector<std::vector<ulint>>* out_pos) {
     using LFPos = TmsIndex::LFPos;
@@ -194,18 +206,32 @@ inline void tms_query_batch_impl(TmsIndex& idx, const std::vector<std::string>& 
         PhiPos ph;        // the toehold: the text position of pos's row
         ulint len;
         uint8_t state;
-        ulint u, d;       // pred and succ candidate intervals
+        ulint u, d;       // pred and succ candidate intervals, or how far their scans have got
+        ulint lo, hi;     // the LF rows prefetched for the scans
+        ulint dist_up, dist_down;  // rows from the current row to u's tail and d's head
+        bool found_up, found_down, scanned_up, scanned_down;
         Side up, down;
     };
-    constexpr ulint rep_window = 8;
+    // LF rows prefetched on each side of the current row before a
+    // reposition's scan, and how many more a scan prefetches on a side
+    // before yielding when it has not found the character.
+    constexpr ulint rep_window = TMS_REP_WINDOW;
+    constexpr ulint scan_extend = TMS_SCAN_EXTEND;
     const ulint last_run = idx.move_runs() - 1;
+    // What the access's LF and FL characters are for each byte, kept local
+    // so that stores to the output cannot force them to be reloaded.
+    constexpr bool packed = std::is_same_v<Access, TmsIndex::PackedAccess>;
+    std::array<uchar, 256> lf_sym, fl_sym;
+    for (size_t c = 0; c < 256; ++c) {
+        lf_sym[c] = packed ? idx.lf_code(static_cast<uchar>(c)) : static_cast<uchar>(c);
+        fl_sym[c] = packed ? idx.fl_code(static_cast<uchar>(c)) : static_cast<uchar>(c);
+    }
     out_len.resize(patterns.size());
     if constexpr (Positions) out_pos->resize(patterns.size());
     if (k == 0) k = 1;
     PhiPos init_ph{};
     if constexpr (Toehold) init_ph = idx.resolve_phi(idx.phi_at_head(0));
-    std::vector<Slot> slots;
-    slots.reserve(k);
+    std::vector<Slot> slots(k);
     size_t next = 0;
     auto start = [&](Slot& s) {
         while (next < patterns.size()) {
@@ -225,11 +251,9 @@ inline void tms_query_batch_impl(TmsIndex& idx, const std::vector<std::string>& 
         }
         return false;
     };
-    for (size_t t = 0; t < k; ++t) {
-        Slot s{};
-        if (!start(s)) break;
-        slots.push_back(s);
-    }
+    // Slots [slots.data(), end) are in flight.
+    Slot* end = slots.data();
+    while (end < slots.data() + k && start(*end)) ++end;
     auto lower = [](const Side& x) { return x.done ? x.value : x.psi_on ? x.psi_lce : 0; };
     auto upper = [](const Side& x, ulint cap) { return x.done ? x.value : x.phi_on ? std::min(x.phi_min, cap) : cap; };
     auto setup = [&](Side& x, ulint dist, ulint cap) {
@@ -241,20 +265,22 @@ inline void tms_query_batch_impl(TmsIndex& idx, const std::vector<std::string>& 
         x.phi_min = INF;
         x.phi_left = dist;
     };
+    constexpr bool PsiWalks = Mode != TmsMode::PHI, PhiWalks = Mode != TmsMode::PSI;
     auto step_side = [&](Side& x, const char* rest, ulint cap) {
-        if (x.psi_on) {
+        if (PsiWalks && x.psi_on) {
             TMS_COUNT(psi_steps, 1);
-            const FLPos q = idx.finish_psi(x.q);
-            if (idx.psi_character(q) == static_cast<uchar>(rest[x.psi_lce]) && ++x.psi_lce < cap) {
-                x.q = idx.start_psi(q);
-                idx.prefetch_psi(x.q.interval);
+            uchar ch;
+            const FLPos next = acc.psi_step(x.q, ch);
+            if (ch == fl_sym[static_cast<uchar>(rest[x.psi_lce])] && ++x.psi_lce < cap) {
+                x.q = next;
+                acc.prefetch_psi(x.q.interval);
             } else {
                 x.done = true;
                 x.value = x.psi_lce;
                 return;
             }
         }
-        if (x.phi_on) {
+        if (PhiWalks && x.phi_on) {
             TMS_COUNT(phi_steps, 1);
             const PhiPos p = idx.finish_phi(x.p);
             x.phi_min = std::min(x.phi_min, idx.plcp(p));
@@ -267,13 +293,15 @@ inline void tms_query_batch_impl(TmsIndex& idx, const std::vector<std::string>& 
             }
         }
     };
-    // Record pat[i - 1]'s statistic, start the LF step from row `from` and
+    // The LF step from resolved position p, unresolved.
+    auto start_LF = [&](LFPos p) { return acc.start_LF(acc.row(p.interval), p); };
+    // Record pat[i - 1]'s statistic, take the LF step started at next, and
     // move the toehold one text position left with it.
-    auto consume = [&](Slot& s, LFPos from) {
+    auto consume = [&](Slot& s, LFPos next) {
         TMS_COUNT(bases, 1);
         s.ms[s.i - 1] = ++s.len;
-        s.pos = idx.start_LF(from);
-        idx.prefetch(s.pos.interval);
+        s.pos = next;
+        acc.prefetch(s.pos.interval);
         if constexpr (Toehold) {
             s.ph = idx.phi_left(s.ph);
             // The next move left from offset 0 reads the row above.
@@ -282,15 +310,18 @@ inline void tms_query_batch_impl(TmsIndex& idx, const std::vector<std::string>& 
         if constexpr (Positions) s.ms_pos[s.i - 1] = s.ph.idx;
         s.state = STEP;
     };
-    while (!slots.empty()) {
-        for (size_t t = 0; t < slots.size();) {
-            Slot& s = slots[t];
+    while (end != slots.data()) {
+        for (Slot* sp = slots.data(); sp < end;) {
+            Slot& s = *sp;
             const uchar c = static_cast<uchar>(s.pat[s.i - 1]);
             bool advanced = false;  // pat[i - 1] is done
             if (s.state == STEP) {
-                const LFPos pos = idx.finish_LF(s.pos);
-                if (idx.get_character(pos.interval) == c) {
-                    consume(s, pos);
+                LFPos pos = s.pos;
+                const auto r = acc.resolve_LF(pos);
+                TMS_COUNT(lf_steps, 1);
+                TMS_COUNT(lf_ff, pos.interval - s.pos.interval);
+                if (acc.code(r) == lf_sym[c]) {
+                    consume(s, acc.start_LF(r, pos));
                     advanced = true;
                 } else if (!idx.occurs(c)) {
                     // Absent character: the statistic is 0 and matching
@@ -300,32 +331,56 @@ inline void tms_query_batch_impl(TmsIndex& idx, const std::vector<std::string>& 
                     advanced = true;
                 } else {
                     const ulint cur = pos.interval;
-                    const ulint lo = cur > rep_window ? cur - rep_window : 0;
-                    const ulint hi = std::min(cur + rep_window, last_run);
-                    for (ulint j = lo; j <= hi; ++j) idx.prefetch(j);
+                    s.u = s.d = cur;
+                    s.lo = cur > rep_window ? cur - rep_window : 0;
+                    s.hi = std::min(cur + rep_window, last_run);
+                    acc.prefetch_rows(s.lo, s.hi);
+                    s.dist_up = pos.offset + 1;
+                    s.dist_down = acc.length(r) - pos.offset;
+                    s.found_up = s.found_down = s.scanned_up = s.scanned_down = false;
                     s.pos = pos;
                     s.state = SCAN;
                 }
             } else if (s.state == PRED_POS) {
                 s.ph = idx.finish_phi(s.ph);
-                consume(s, s.pos);
+                consume(s, start_LF(s.pos));
                 advanced = true;
             } else {
                 const ulint cap = s.len;
                 if (s.state == SCAN) {
-                    const ulint cur = s.pos.interval;
-                    ulint dist_up = s.pos.offset + 1, dist_down = idx.get_length(cur) - s.pos.offset;
-                    bool found_up = false, found_down = false;
-                    s.u = s.d = cur;
-                    while (s.u > 0) {
-                        if (idx.get_character(--s.u) == c) { found_up = true; break; }
-                        dist_up += idx.get_length(s.u);
+                    // Scan only rows prefetched on an earlier visit; a side
+                    // that runs out of them prefetches more and yields.
+                    TMS_COUNT(scan_visits, 1);
+                    while (!s.scanned_up && s.u > s.lo) {
+                        const auto r = acc.row(--s.u);
+                        if (acc.code(r) == lf_sym[c]) s.found_up = s.scanned_up = true;
+                        else s.dist_up += acc.length(r);
                     }
-                    while (s.d < last_run) {
-                        if (idx.get_character(++s.d) == c) { found_down = true; break; }
-                        dist_down += idx.get_length(s.d);
+                    if (s.u == 0) s.scanned_up = true;
+                    while (!s.scanned_down && s.d < s.hi) {
+                        const auto r = acc.row(++s.d);
+                        if (acc.code(r) == lf_sym[c]) s.found_down = s.scanned_down = true;
+                        else s.dist_down += acc.length(r);
                     }
+                    if (s.d == last_run) s.scanned_down = true;
+                    if (!s.scanned_up || !s.scanned_down) {
+                        if (!s.scanned_up) {
+                            const ulint lo = s.lo > scan_extend ? s.lo - scan_extend : 0;
+                            acc.prefetch_rows(lo, s.lo - 1);
+                            s.lo = lo;
+                        }
+                        if (!s.scanned_down) {
+                            const ulint hi = std::min(s.hi + scan_extend, last_run);
+                            acc.prefetch_rows(s.hi + 1, hi);
+                            s.hi = hi;
+                        }
+                        ++sp;
+                        continue;
+                    }
+                    const bool found_up = s.found_up, found_down = s.found_down;
+                    const ulint dist_up = s.dist_up, dist_down = s.dist_down;
                     TMS_COUNT(repositions, 1);
+                    TMS_COUNT(scan_rows, s.d - s.u);
                     TMS_COUNT(len_at_rep, cap);
                     TMS_COUNT(dist, std::min(found_up ? dist_up : INF, found_down ? dist_down : INF));
                     TMS_COUNT(dist1, (found_up && dist_up == 1) || (found_down && dist_down == 1));
@@ -341,12 +396,21 @@ inline void tms_query_batch_impl(TmsIndex& idx, const std::vector<std::string>& 
                     } else {
                         if (found_up) {
                             setup(s.up, dist_up, cap);
-                            if (s.up.psi_on) { s.up.q = idx.psi_at_tail(s.u); idx.prefetch_psi(s.up.q.interval); }
+                            if (s.up.psi_on) { s.up.q = acc.psi_at_tail(acc.row(s.u)); acc.prefetch_psi(s.up.q.interval); }
                             if (s.up.phi_on) s.up.p = s.ph;  // the current row is the lower one
                         }
                         if (found_down) {
                             setup(s.down, dist_down, cap);
-                            if (s.down.psi_on) { s.down.q = idx.psi_at_head(s.d); idx.prefetch_psi(s.down.q.interval); }
+                            if (s.down.psi_on) {
+                                // The head's FL point is one past the tail
+                                // of the interval above (d > 0 here),
+                                // unresolved: the first psi step may move on
+                                // to the next FL row.
+                                s.down.q = acc.psi_at_tail(acc.row(s.d - 1));
+                                ++s.down.q.offset;
+                                acc.prefetch_psi(s.down.q.interval);
+                                if (s.down.q.interval + 1 < idx.psi_intervals()) acc.prefetch_psi(s.down.q.interval + 1);
+                            }
                             if (s.down.phi_on) { s.down.p = idx.phi_at_head(s.d); idx.prefetch_phi(s.down.p.interval); }
                         }
                     }
@@ -358,12 +422,23 @@ inline void tms_query_batch_impl(TmsIndex& idx, const std::vector<std::string>& 
                     s.state = WALK;
                 } else {
                     const char* rest = s.pat + s.i;
+                    TMS_COUNT(walk_visits, 1);
                     if (s.up.active()) step_side(s.up, rest, cap);
-                    if (s.down.active()) step_side(s.down, rest, cap);
+                    if constexpr (Mode == TmsMode::PSI) {
+                        // With psi counts alone, the only early decision is
+                        // pred reaching the cap, since succ needs a strictly
+                        // larger LCE; every other case waits for both counts.
+                        if (s.up.done && s.up.value == cap) s.down.lost = true;
+                        else if (s.down.active()) step_side(s.down, rest, cap);
+                    } else {
+                        if (s.down.active()) step_side(s.down, rest, cap);
+                    }
                 }
-                if (!s.up.lost && !s.down.lost) {
-                    if (upper(s.down, cap) <= lower(s.up)) s.down.lost = true;
-                    else if (upper(s.up, cap) < lower(s.down)) s.up.lost = true;
+                if constexpr (Mode != TmsMode::PSI) {
+                    if (!s.up.lost && !s.down.lost) {
+                        if (upper(s.down, cap) <= lower(s.up)) s.down.lost = true;
+                        else if (upper(s.up, cap) < lower(s.down)) s.up.lost = true;
+                    }
                 }
                 if (!s.up.active() && !s.down.active()) {
                     TMS_COUNT(lce, std::max(s.up.done ? s.up.value : 0, s.down.done ? s.down.value : 0));
@@ -381,7 +456,7 @@ inline void tms_query_batch_impl(TmsIndex& idx, const std::vector<std::string>& 
                             s.pos = from;
                             s.state = PRED_POS;
                         } else {
-                            consume(s, from);
+                            consume(s, start_LF(from));
                             advanced = true;
                         }
                     } else {
@@ -389,31 +464,40 @@ inline void tms_query_batch_impl(TmsIndex& idx, const std::vector<std::string>& 
                         from = idx.down(from);
                         s.len = s.down.value;
                         if constexpr (Toehold) s.ph = idx.resolve_phi(idx.phi_at_head(s.d));
-                        consume(s, from);
+                        consume(s, start_LF(from));
                         advanced = true;
                     }
                 }
             }
-            if (!advanced || --s.i > 0 || start(s)) {
-                ++t;
-            } else {
-                s = slots.back();
-                slots.pop_back();
-            }
+            if (!advanced || --s.i > 0 || start(s)) ++sp;
+            else s = *--end;
         }
     }
 }
 
-/** tms_query_batch_impl with the mode and positions chosen at run time. */
+/**
+ * tms_query_batch_impl with the mode and positions chosen at run time.  Rows
+ * are read through packed access when the index's column widths allow it
+ * and packed is true, else through column access.
+ */
 inline void tms_query_batch(TmsIndex& idx, const std::vector<std::string>& patterns, size_t k,
                             std::vector<std::vector<ulint>>& out_len,
-                            TmsMode mode = TmsMode::PSI, std::vector<std::vector<ulint>>* out_pos = nullptr) {
+                            TmsMode mode = TmsMode::PSI, std::vector<std::vector<ulint>>* out_pos = nullptr,
+                            bool packed = true) {
     if ((mode != TmsMode::PSI || out_pos) && !idx.has_phi())
         throw std::invalid_argument("this mode or positions need an index built with phi");
+    const TmsIndex::PackedAccess pa = idx.packed_access();
+    const bool use_packed = packed && pa.fits();
     auto run = [&](auto m) {
         constexpr TmsMode M = decltype(m)::value;
-        if (out_pos) tms_query_batch_impl<M, true>(idx, patterns, k, out_len, out_pos);
-        else tms_query_batch_impl<M, false>(idx, patterns, k, out_len, nullptr);
+        if (use_packed) {
+            if (out_pos) tms_query_batch_impl<M, true>(idx, pa, patterns, k, out_len, out_pos);
+            else tms_query_batch_impl<M, false>(idx, pa, patterns, k, out_len, nullptr);
+        } else {
+            const TmsIndex::ColumnAccess ca = idx.column_access();
+            if (out_pos) tms_query_batch_impl<M, true>(idx, ca, patterns, k, out_len, out_pos);
+            else tms_query_batch_impl<M, false>(idx, ca, patterns, k, out_len, nullptr);
+        }
     };
     switch (mode) {
         case TmsMode::PSI: run(std::integral_constant<TmsMode, TmsMode::PSI>{}); break;
