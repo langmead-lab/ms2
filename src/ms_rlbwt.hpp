@@ -40,22 +40,56 @@ using uchar = orbit::uchar;
 using ulint = orbit::ulint;
 
 /**
- * compress_lcps: replace interior LCP values that are >= max(boundary)
- *                with placeholders that will not be stored.
+ * Decide which interior LCP values of a run must be stored.  lcp[0] is the
+ * run's top (boundary) LCP and lcp_next, if present, is the next run's LCP
+ * vector, whose first element is the boundary below this run.
+ *
+ * Queries only ask for the minimum over rows [0, o] together with the top
+ * boundary, or over rows (o, end) followed by the bottom boundary.  With
+ * minima_only false, an interior value is kept when it is below the larger of
+ * the two boundaries.  With minima_only true, it is kept only when it is a
+ * strict new minimum scanning down from the top boundary or scanning up from
+ * the bottom boundary; those are the only values that can answer a query.
+ * Element 0 of the result is unused.
+ */
+inline std::vector<bool> lcp_keep_mask(const std::vector<ulint>& lcp,
+                                       const std::vector<ulint>* lcp_next,
+                                       bool minima_only = false) {
+    std::vector<bool> keep(lcp.size(), false);
+    if (lcp.size() < 2) return keep;
+    const bool has_next = lcp_next && !lcp_next->empty();
+    if (!minima_only) {
+        ulint m = lcp[0];
+        if (has_next) m = std::max(m, (*lcp_next)[0]);
+        for (size_t i = 1; i < lcp.size(); ++i) keep[i] = lcp[i] < m;
+        return keep;
+    }
+    ulint m = lcp[0];
+    for (size_t i = 1; i < lcp.size(); ++i)
+        if (lcp[i] < m) { keep[i] = true; m = lcp[i]; }
+    // With no run below, there is no bottom boundary to cap a downward
+    // query, so every suffix minimum is needed.
+    m = has_next ? (*lcp_next)[0] : std::numeric_limits<ulint>::max();
+    for (size_t i = lcp.size() - 1; i >= 1; --i)
+        if (lcp[i] < m) { keep[i] = true; m = lcp[i]; }
+    return keep;
+}
+
+/**
+ * compress_lcps: replace interior LCP values that are not needed (see
+ *                lcp_keep_mask) with placeholders that will not be stored.
  * Appends to out: [top_lcp, compressed interior...] where gaps are LCP_GAP.
  */
 inline void compress_lcps(const std::vector<ulint>& lcp,
                           const std::vector<ulint>* lcp_next,
-                          std::vector<ulint>& out) {
+                          std::vector<ulint>& out,
+                          bool minima_only = false) {
     out.clear();
     if (lcp.empty()) return;
-    ulint top_lcp = lcp[0];
-    out.push_back(top_lcp);
-    ulint lcp_top_bot_max = top_lcp;
-    if (lcp_next && !lcp_next->empty())
-        lcp_top_bot_max = std::max(lcp_top_bot_max, (*lcp_next)[0]);
+    out.push_back(lcp[0]);
+    auto keep = lcp_keep_mask(lcp, lcp_next, minima_only);
     for (size_t i = 1; i < lcp.size(); ++i)
-        out.push_back(lcp[i] < lcp_top_bot_max ? lcp[i] : LCP_GAP);
+        out.push_back(keep[i] ? lcp[i] : LCP_GAP);
 }
 
 constexpr ulint NO_SPILL = 0;
@@ -153,15 +187,14 @@ constexpr ulint SPLIT_THRESHOLD_NEVER = std::numeric_limits<ulint>::max();
  * the number of LCPs that are ignored.
  */
 inline size_t compression_improvement(const std::vector<ulint>& lcp,
-                                      const std::vector<ulint>* lcp_next)
+                                      const std::vector<ulint>* lcp_next,
+                                      bool minima_only = false)
 {
     if (lcp.size() < 2) return 0;
-    ulint m = lcp[0];
-    if (lcp_next && !lcp_next->empty())
-        m = std::max(m, (*lcp_next)[0]);
+    auto keep = lcp_keep_mask(lcp, lcp_next, minima_only);
     size_t c = 0;
     for (size_t i = 1; i < lcp.size(); ++i)
-        if (lcp[i] >= m) ++c;
+        if (!keep[i]) ++c;
     return c;
 }
 
@@ -173,7 +206,8 @@ inline size_t compression_improvement(const std::vector<ulint>& lcp,
 inline std::tuple<bool, std::vector<ulint>, std::vector<ulint>>
 possibly_split_lcps(const std::vector<ulint>& lcp,
                     const std::vector<ulint>* lcp_next,
-                    ulint split_threshold = SPLIT_THRESHOLD_NEVER)
+                    ulint split_threshold = SPLIT_THRESHOLD_NEVER,
+                    bool minima_only = false)
 {
     std::vector<ulint> empty;
     if (lcp.size() < 3) return {false, lcp, empty};
@@ -195,9 +229,9 @@ possibly_split_lcps(const std::vector<ulint>& lcp,
     bot.reserve(lcp.size() - min_idx);
     bot.push_back(min_val);
     for (size_t i = min_idx + 1; i < lcp.size(); ++i) bot.push_back(lcp[i]);
-    size_t base_imp = compression_improvement(lcp, lcp_next);
-    size_t top_imp = compression_improvement(top, &bot);
-    size_t bot_imp = compression_improvement(bot, lcp_next);
+    size_t base_imp = compression_improvement(lcp, lcp_next, minima_only);
+    size_t top_imp = compression_improvement(top, &bot, minima_only);
+    size_t bot_imp = compression_improvement(bot, lcp_next, minima_only);
     size_t gain = (top_imp + bot_imp > base_imp) ? (top_imp + bot_imp - base_imp) : 0;
     if (gain > split_threshold) return {true, std::move(top), std::move(bot)};
     return {false, lcp, empty};
@@ -212,13 +246,14 @@ namespace detail {
 inline void recursive_split_lcps(const std::vector<ulint>& lcp,
                                  const std::vector<ulint>* lcp_next,
                                  size_t orig_i, ulint split_threshold,
-                                 std::vector<std::pair<std::vector<ulint>, size_t>>& out)
+                                 std::vector<std::pair<std::vector<ulint>, size_t>>& out,
+                                 bool minima_only = false)
 {
     if (lcp.size() < 3) { out.emplace_back(lcp, orig_i); return; }
-    auto [did, top, bot] = possibly_split_lcps(lcp, lcp_next, split_threshold);
+    auto [did, top, bot] = possibly_split_lcps(lcp, lcp_next, split_threshold, minima_only);
     if (!did || bot.empty()) { out.emplace_back(lcp, orig_i); return; }
-    recursive_split_lcps(top, &bot, orig_i, split_threshold, out);
-    recursive_split_lcps(bot, lcp_next, orig_i, split_threshold, out);
+    recursive_split_lcps(top, &bot, orig_i, split_threshold, out, minima_only);
+    recursive_split_lcps(bot, lcp_next, orig_i, split_threshold, out, minima_only);
 }
 
 }  // namespace detail
@@ -229,13 +264,14 @@ inline void recursive_split_lcps(const std::vector<ulint>& lcp,
 inline void apply_lcp_splitting(std::vector<uchar>& bwt_heads,
                                std::vector<ulint>& bwt_run_lengths,
                                std::vector<std::vector<ulint>>& lcps_per_run,
-                               ulint split_threshold) {
+                               ulint split_threshold,
+                               bool minima_only = false) {
     if (split_threshold == SPLIT_THRESHOLD_NEVER || lcps_per_run.empty()) return;
     const size_t n = lcps_per_run.size();
     std::vector<std::pair<std::vector<ulint>, size_t>> new_lcps;
     for (size_t i = 0; i < n; ++i) {
         const std::vector<ulint>* next = (i + 1 < n) ? &lcps_per_run[i + 1] : nullptr;
-        detail::recursive_split_lcps(lcps_per_run[i], next, i, split_threshold, new_lcps);
+        detail::recursive_split_lcps(lcps_per_run[i], next, i, split_threshold, new_lcps, minima_only);
     }
     std::vector<uchar> nh;
     std::vector<ulint> nl;
@@ -259,7 +295,33 @@ inline ulint max_for_bits(uchar w) {
 }
 
 /**
- * Build the full spillover data for the index.
+ * Per-run retained LCPs as (offset, value) pairs: element 0 is (0, top LCP)
+ * and the rest are the stored interior values in increasing offset order.
+ */
+using RunLcpPairs = std::vector<std::pair<ulint, ulint>>;
+
+/**
+ * Reduce full per-row LCP vectors to the retained pairs of each run (see
+ * lcp_keep_mask for which interior values are kept).
+ */
+inline std::vector<RunLcpPairs>
+retained_lcp_pairs(const std::vector<std::vector<ulint>>& lcps_per_run, bool minima_only = false) {
+    const size_t r = lcps_per_run.size();
+    std::vector<RunLcpPairs> all_pairs(r);
+    std::vector<ulint> full;
+    for (size_t i = 0; i < r; ++i) {
+        const std::vector<ulint>* next = (i + 1 < r) ? &lcps_per_run[i + 1] : nullptr;
+        full.clear();
+        compress_lcps(lcps_per_run[i], next, full, minima_only);
+        all_pairs[i] = detail::compressed_to_pairs(full);
+    }
+    return all_pairs;
+}
+
+/**
+ * Build the full spillover data for the index from each run's retained LCP
+ * pairs (as produced by retained_lcp_pairs, or read from a TeraLCP minima
+ * file).
  * spill_align: 0=none, else align chunks to multiples of spill_align bytes.
  * spill_split_bits: X LSBs of row index select which spillover array (0=single array).
  * spill_off is stored as byte_offset / spill_align to save bits.
@@ -267,27 +329,21 @@ inline ulint max_for_bits(uchar w) {
 inline std::tuple<
     std::vector<std::array<ulint, static_cast<size_t>(LCPSpillRunCols::COUNT)>>,
     std::vector<SpilloverVector>, ulint, ulint, size_t, size_t>
-build_spill_data(const std::vector<std::vector<ulint>>& lcps_per_run,
-                 double percentile_k = 0.98,
-                 bool coalesce_spillover = false,
-                 bool coalesce_lcp_separately = false,
-                 ulint split_threshold = SPLIT_THRESHOLD_NEVER,
-                 ulint spill_align = 0,
-                 uchar spill_split_bits = 0)
+build_spill_data_from_pairs(std::vector<RunLcpPairs> all_pairs,
+                            double percentile_k = 0.98,
+                            bool coalesce_spillover = false,
+                            bool coalesce_lcp_separately = false,
+                            ulint spill_align = 0,
+                            uchar spill_split_bits = 0)
 {
     if (coalesce_lcp_separately && spill_align > 0)
         throw std::invalid_argument("coalescing LCPs separately is not compatible with spill-align");
-    const size_t r = lcps_per_run.size();
+    const size_t r = all_pairs.size();
     size_t skinny_count = 0, jumbo_count = 0;
     std::vector<ulint> all_top, all_sub;
-    std::vector<std::vector<std::pair<ulint, ulint>>> all_pairs(r);
-    std::vector<ulint> full;
 
     for (size_t i = 0; i < r; ++i) {
-        const std::vector<ulint>* next = (i + 1 < r) ? &lcps_per_run[i + 1] : nullptr;
-        full.clear();
-        compress_lcps(lcps_per_run[i], next, full);
-        auto pairs = detail::compressed_to_pairs(full);
+        const auto& pairs = all_pairs[i];
         assert(!pairs.empty());
         if (pairs.size() == 1) {
             all_top.push_back(pairs[0].second);
@@ -301,7 +357,6 @@ build_spill_data(const std::vector<std::vector<ulint>>& lcps_per_run,
             all_top.push_back(pairs[0].second);
             all_sub.push_back(sub);
         }
-        all_pairs[i] = std::move(pairs);
     }
 
     ulint p_top = detail::percentile(all_top, percentile_k);
@@ -426,6 +481,29 @@ build_spill_data(const std::vector<std::vector<ulint>>& lcps_per_run,
         }
     }
     return {run_data, spill_vectors, max_top, max_sub, skinny_count, jumbo_count};
+}
+
+/**
+ * Build the full spillover data for the index from full per-row LCP vectors.
+ * split_threshold is accepted for interface compatibility; splitting is
+ * applied beforehand by apply_lcp_splitting.
+ */
+inline std::tuple<
+    std::vector<std::array<ulint, static_cast<size_t>(LCPSpillRunCols::COUNT)>>,
+    std::vector<SpilloverVector>, ulint, ulint, size_t, size_t>
+build_spill_data(const std::vector<std::vector<ulint>>& lcps_per_run,
+                 double percentile_k = 0.98,
+                 bool coalesce_spillover = false,
+                 bool coalesce_lcp_separately = false,
+                 ulint split_threshold = SPLIT_THRESHOLD_NEVER,
+                 ulint spill_align = 0,
+                 uchar spill_split_bits = 0,
+                 bool minima_only = false)
+{
+    (void)split_threshold;
+    return build_spill_data_from_pairs(retained_lcp_pairs(lcps_per_run, minima_only), percentile_k,
+                                       coalesce_spillover, coalesce_lcp_separately, spill_align,
+                                       spill_split_bits);
 }
 
 enum class LCPRunCols { TOP_LCP, COUNT };

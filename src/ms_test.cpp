@@ -9,6 +9,8 @@
 #include "ms_rlbwt.hpp"
 #include "ms_io.hpp"
 #include "tsv.hpp"
+#include "rlbwt_io.hpp"
+#include <cstdio>
 #include <iostream>
 #include <cassert>
 #include <cstdio>
@@ -465,12 +467,14 @@ bool test_ms_query_vs_naive_mutated(const std::string& data_dir) {
 
     struct Config { const char* name; ms_io::BuildOptions opts; };
     std::vector<Config> configs;
-    auto add = [&](const char* name, bool coalesce, ulint align, uchar split_bits, ulint split_threshold) {
+    auto add = [&](const char* name, bool coalesce, ulint align, uchar split_bits, ulint split_threshold,
+                   bool minima_only = false) {
         ms_io::BuildOptions o;
         o.coalesce = coalesce;
         o.spill_align = align;
         o.spill_split_bits = split_bits;
         o.split_threshold = split_threshold;
+        o.minima_only = minima_only;
         configs.push_back({name, o});
     };
     add("base", false, 0, 0, SPLIT_THRESHOLD_NEVER);
@@ -480,6 +484,9 @@ bool test_ms_query_vs_naive_mutated(const std::string& data_dir) {
     add("coalesce+align4", true, 4, 0, SPLIT_THRESHOLD_NEVER);
     add("coalesce+align8+splitbits2", true, 8, 2, SPLIT_THRESHOLD_NEVER);
     add("coalesce+split1+align4", true, 4, 0, 1);
+    add("minima", false, 0, 0, SPLIT_THRESHOLD_NEVER, true);
+    add("minima+coalesce+align4", true, 4, 0, SPLIT_THRESHOLD_NEVER, true);
+    add("minima+coalesce+split1+align8+splitbits2", true, 8, 2, 1, true);
 
     for (const auto& cfg : configs) {
         auto idx = ms_io::build_ms_index_spill_from_tsv<false>(path, cfg.opts);
@@ -493,6 +500,70 @@ bool test_ms_query_vs_naive_mutated(const std::string& data_dir) {
         }
         std::cout << "  " << cfg.name << " PASSED" << std::endl;
     }
+    return true;
+}
+
+/**
+ * Build the same index two ways and check that they answer identically: from
+ * the TSV, and from RLBWT heads/lens files (sentinel written as 0x00, so it
+ * maps to orbit::TERMINATOR rather than the TSV path's separator code) plus
+ * retained LCP pairs.  This is the path used when LCP minima come from
+ * TeraLCP instead of a per-row LCP TSV.
+ */
+bool test_rlbwt_input_path(const std::string& data_dir) {
+    std::cout << "Testing RLBWT heads/lens input path against the TSV path" << std::endl;
+    std::string path = data_dir + "/minishred1_20_002_lcp.tsv";
+    std::vector<uchar> tsv_heads;
+    std::vector<ulint> tsv_lens;
+    std::vector<std::vector<ulint>> lcps_per_run;
+    if (!tsv::load_tsv(path, tsv_heads, tsv_lens, lcps_per_run)) {
+        std::cout << "  DID NOT RUN" << std::endl;
+        return false;
+    }
+    std::vector<uchar> raw_heads(tsv_heads);
+    for (auto& h : raw_heads) if (h == 1) h = 0x00;  // TSV maps its # terminator to 1
+    const std::string hp = data_dir + "/.ms_test_rlbwt.heads", lp = data_dir + "/.ms_test_rlbwt.len";
+    const bool wrote_rlbwt = rlbwt_io::write_rlbwt(hp, lp, raw_heads, tsv_lens);
+    assert(wrote_rlbwt && "the RLBWT files must be written");
+    std::vector<uchar> heads;
+    std::vector<ulint> lens;
+    std::string err;
+    bool ok = rlbwt_io::load_rlbwt(hp, lp, heads, lens, err);
+    std::remove(hp.c_str());
+    std::remove(lp.c_str());
+    assert(ok && "load_rlbwt must succeed");
+    assert(lens == tsv_lens);
+
+    // Round-trip the retained pairs through a TLMSM minima file, the form
+    // TeraLCP -ominima writes.
+    ulint n = 0;
+    for (ulint l : lens) n += l;
+    auto pairs = retained_lcp_pairs(lcps_per_run, true);
+    const std::string mp = data_dir + "/.ms_test_rlbwt.min";
+    const bool wrote_minima = rlbwt_io::write_minima(mp, pairs, n);
+    assert(wrote_minima && "the minima file must be written");
+    std::vector<RunLcpPairs> read_back;
+    ok = rlbwt_io::read_minima(mp, heads.size(), n, read_back, err);
+    std::remove(mp.c_str());
+    assert(ok && read_back == pairs && "minima file must round-trip");
+
+    ms_io::BuildOptions o;
+    o.minima_only = true; o.percentile_k = 0.9; o.coalesce = true; o.spill_split_bits = 6;
+    auto from_tsv = ms_io::build_ms_index_spill_from_tsv<false>(path, o);
+    auto [run_data, spill_vectors, max_top, max_sub, skinny, jumbo] = build_spill_data_from_pairs(
+        std::move(read_back), o.percentile_k, o.coalesce, false, o.spill_align, o.spill_split_bits);
+    MSIndexSpillLCP<false> from_rlbwt(heads, lens, run_data, std::move(spill_vectors), max_top, max_sub,
+                                      o.spill_align, o.spill_split_bits);
+    const std::string T = reconstruct_text(*from_tsv);
+    std::mt19937 rng(7);
+    std::uniform_int_distribution<size_t> start_dist(0, T.size() - 100);
+    for (int k = 0; k < 100; ++k) {
+        std::string P = T.substr(start_dist(rng), 100);
+        for (size_t j = 0; j < P.size(); j += 17) P[j] = "ACGT"[(j + k) % 4];
+        if (k % 4 == 0) P[50] = 'N';
+        assert(ms_query(*from_tsv, P) == ms_query(from_rlbwt, P) && "RLBWT and TSV paths must agree");
+    }
+    std::cout << "  PASSED" << std::endl;
     return true;
 }
 
@@ -678,6 +749,8 @@ bool run_all_tests(const std::string& data_dir) {
     if (!test_coalesce_spillover_from_tsv(data_dir)) all_ran = false;
     std::cout << std::endl;
     if (!test_ms_query_vs_naive_mutated(data_dir)) all_ran = false;
+    std::cout << std::endl;
+    if (!test_rlbwt_input_path(data_dir)) all_ran = false;
     std::cout << std::endl;
     if (all_ran) {
         std::cout << "All ms_test checks PASSED" << std::endl;
