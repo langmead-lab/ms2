@@ -14,6 +14,7 @@
 #include "rlbwt_io.hpp"
 #include "tms_index.hpp"
 #include "tms_query.hpp"
+#include "tms_smem.hpp"
 #include "tms_test.hpp"
 #include "perf_counters.hpp"
 #include <iostream>
@@ -51,14 +52,16 @@ static void usage(const char* prog) {
               << "              values.  --no-output skips writing (for timing).  --interleave K\n"
               << "              keeps K reads in flight, prefetching each one's next row\n"
               << "              (default 32); K = 0 queries one read at a time without\n"
-              << "              prefetching.  Results do not depend on K.  A summary with\n"
+              << "              prefetching (ms_query for batch, the batched engine with one\n"
+              << "              read for tms-batch).  Results do not depend on K.  A summary with\n"
               << "              query time per base goes to stderr.\n"
               << "  tms-build  HEADS LENS INDEX_PATH [--minima FILE] [--lf-split B] [--fl-split B]\n"
-              << "            [--phi-split B] [--lcp-bin FILE]\n"
+              << "            [--phi-split B] [--lcp-bin FILE] [--no-phi-inv]\n"
               << "              Build a tms index from an RLBWT: LF and psi, which need no LCP\n"
               << "              input, and with --minima (a TeraLCP -ominima file, of which only\n"
               << "              each run's top LCP is used) or --lcp-bin (one 64-bit LCP per row)\n"
-              << "              also phi.  --lf-split, --fl-split\n"
+              << "              also phi and phi_inv (phi_inv unless --no-phi-inv; it is needed\n"
+              << "              only for tms-batch --report smem-all).  --lf-split, --fl-split\n"
               << "              and --phi-split set Orbit's balancing factor for that structure\n"
               << "              (0 = no splitting; defaults: LF 0, FL and phi Orbit's default\n"
               << "              length capping and balancing).\n"
@@ -66,11 +69,24 @@ static void usage(const char* prog) {
               << "              Same, taking the runs and their top LCPs from a TSV.\n"
               << "  tms-batch  INDEX_PATH READS [-o OUT] [--no-output] [--interleave K]\n"
               << "            [--mode psi|phi|phiskip|dual] [--positions]\n"
+              << "            [--report ms|smem-one|smem-all] [--min-smem-len T]\n"
+              << "            [--max-smem-positions N]\n"
               << "              As batch, with a tms index.  --mode sets how repositions\n"
               << "              compute LCEs (default psi; the others need phi).  --positions\n"
-              << "              adds a third field with an occurrence position for each value\n"
-              << "              (-1 where it is 0); it needs phi.  Results do not depend on the\n"
-              << "              mode or K.\n"
+              << "              adds a field with an occurrence position for each value (-1\n"
+              << "              where it is 0); it needs phi.  --report adds a field with the\n"
+              << "              read's SMEMs (super-maximal exact matches), space-separated:\n"
+              << "              ms (the default) adds none; smem-one gives each as i:L:p, with\n"
+              << "              start i in the read, length L and one text position p where it\n"
+              << "              occurs, and needs phi; smem-all gives each as i:L:c:p1,p2,...,\n"
+              << "              with all c text positions in BWT row order, and needs phi and\n"
+              << "              phi_inv.  --min-smem-len T keeps only SMEMs with L > T (default\n"
+              << "              0, all of them) in both SMEM reports.  --max-smem-positions N\n"
+              << "              makes smem-all list at most N positions per SMEM, the first N in\n"
+              << "              BWT row order, while c still counts all of them (default: list\n"
+              << "              all).  With smem-all, K also sets how many of its phi and\n"
+              << "              phi_inv walks list positions at once (K = 0: one SMEM at a\n"
+              << "              time).  Results do not depend on the mode or K.\n"
               << "  tms-text   INDEX_PATH\n"
               << "              Print the indexed text, read back with LF.\n"
               << "  tms-inspect INDEX_PATH\n"
@@ -163,24 +179,42 @@ static void query_many(MSIndexSpillLCP<false>& idx, const std::vector<std::strin
 // tms-batch settings, from its command line.
 static TmsMode g_tms_mode = TmsMode::PSI;
 static bool g_tms_positions = false;
+static TmsReport g_tms_report = TmsReport::MS;
+static ulint g_tms_min_smem_len = 0;
+static ulint g_tms_max_smem_positions = TMS_ALL_POSITIONS;
 static std::vector<std::vector<ulint>> g_tms_pos;
+static std::vector<TmsSmemHits> g_tms_hits;
 
-static std::vector<ulint> query_one(TmsIndex& idx, const std::string& s) {
-    std::vector<std::vector<ulint>> len;
-    tms_query_batch(idx, {s}, 1, len, g_tms_mode, g_tms_positions ? &g_tms_pos : nullptr);
-    return std::move(len[0]);
+// With an SMEM report, the SMEMs are found as part of the query.  smem_k
+// walks are in flight when smem-all lists positions (0 lists them one SMEM
+// at a time).
+static void query_many(TmsIndex& idx, const std::vector<std::string>& p, size_t k,
+                       std::vector<std::vector<ulint>>& out, size_t smem_k) {
+    const bool smems = g_tms_report != TmsReport::MS;
+    tms_query_batch(idx, p, k, out, g_tms_mode, g_tms_positions || smems ? &g_tms_pos : nullptr);
+    if (!smems) return;
+    tms_report_smems_batch(idx, out, g_tms_pos, g_tms_min_smem_len, g_tms_report, smem_k, g_tms_hits,
+                           g_tms_max_smem_positions);
 }
 static void query_many(TmsIndex& idx, const std::vector<std::string>& p, size_t k,
                        std::vector<std::vector<ulint>>& out) {
-    tms_query_batch(idx, p, k, out, g_tms_mode, g_tms_positions ? &g_tms_pos : nullptr);
+    query_many(idx, p, k, out, k);
+}
+// One read at a time runs the batched engine with one read: it is faster
+// than tms_query, the plain psi reference, whereas ms_query is as fast as
+// ms's engine with one read.  smem-all lists positions one SMEM at a time.
+static std::vector<ulint> query_one(TmsIndex& idx, const std::string& s) {
+    std::vector<std::vector<ulint>> len;
+    query_many(idx, {s}, 1, len, 0);
+    return std::move(len[0]);
 }
 
-static std::optional<TmsIndex> read_tms_index(const std::string& path) {
+static std::optional<TmsIndex> read_tms_index(const std::string& path, bool with_phi_inv = true) {
     std::ifstream in(path, std::ios::binary);
     if (!in.good()) return std::nullopt;
     TmsIndex idx;
     try {
-        idx.load(in);
+        idx.load(in, with_phi_inv);
     } catch (const std::exception& e) {
         std::cerr << e.what() << "\n";
         return std::nullopt;
@@ -215,6 +249,17 @@ static int run_batch(int argc, char** argv, std::optional<Index> (*read)(const s
             else if (m == "dual") g_tms_mode = TmsMode::DUAL;
             else { std::cerr << "Unknown mode: " << m << "\n"; return 1; }
         }
+        else if (std::is_same_v<Index, TmsIndex> && strcmp(argv[i], "--report") == 0 && i + 1 < argc) {
+            const std::string r = argv[++i];
+            if (r == "ms") g_tms_report = TmsReport::MS;
+            else if (r == "smem-one") g_tms_report = TmsReport::SMEM_ONE;
+            else if (r == "smem-all") g_tms_report = TmsReport::SMEM_ALL;
+            else { std::cerr << "Unknown report: " << r << "\n"; return 1; }
+        }
+        else if (std::is_same_v<Index, TmsIndex> && strcmp(argv[i], "--min-smem-len") == 0 && i + 1 < argc)
+            g_tms_min_smem_len = static_cast<ulint>(std::stoull(argv[++i]));
+        else if (std::is_same_v<Index, TmsIndex> && strcmp(argv[i], "--max-smem-positions") == 0 && i + 1 < argc)
+            g_tms_max_smem_positions = static_cast<ulint>(std::stoull(argv[++i]));
         else { std::cerr << "Unknown batch option: " << argv[i] << "\n"; return 1; }
     }
     using clock = std::chrono::steady_clock;
@@ -225,6 +270,16 @@ static int run_batch(int argc, char** argv, std::optional<Index> (*read)(const s
         return 1;
     }
     const double load_s = std::chrono::duration<double>(clock::now() - t0).count();
+    if constexpr (std::is_same_v<Index, TmsIndex>) {
+        if ((g_tms_positions || g_tms_report != TmsReport::MS || g_tms_mode != TmsMode::PSI) && !opt->has_phi()) {
+            std::cerr << "--positions, --report smem-one/smem-all and modes other than psi need an index with phi\n";
+            return 1;
+        }
+        if (g_tms_report == TmsReport::SMEM_ALL && !opt->has_phi_inv()) {
+            std::cerr << "--report smem-all needs an index with phi_inv\n";
+            return 1;
+        }
+    }
 
     std::ifstream fin;
     std::istream* in = &std::cin;
@@ -248,8 +303,8 @@ static int run_batch(int argc, char** argv, std::optional<Index> (*read)(const s
     double query_s = 0.0;
     PerfCounters perf;
     auto t_all = clock::now();
-    // With --positions, a second tab-separated field holds the positions
-    // (-1 for none).
+    // With --positions, a tab-separated field holds the positions (-1 for
+    // none); with an SMEM report, a last one holds the SMEMs.
     auto write_ms = [&](const std::string& nm, const std::vector<ulint>& ms, size_t j) {
         line.clear();
         line += nm;
@@ -264,6 +319,12 @@ static int run_batch(int argc, char** argv, std::optional<Index> (*read)(const s
             for (size_t i = 0; i < pos.size(); ++i) {
                 if (i > 0) line += ' ';
                 line += pos[i] == TMS_NO_POS ? std::string("-1") : std::to_string(pos[i]);
+            }
+        }
+        if constexpr (std::is_same_v<Index, TmsIndex>) {
+            if (g_tms_report != TmsReport::MS) {
+                line += '\t';
+                tms_format_smems(g_tms_hits[j], g_tms_report, line);
             }
         }
         line += '\n';
@@ -345,6 +406,14 @@ int main(int argc, char** argv) {
     const std::string cmd = argv[1];
     argc -= 2;
     argv += 2;
+
+#ifdef NDEBUG
+    // The test suites check their results with assert.
+    if (cmd == "test" || cmd == "tms-test") {
+        std::cerr << cmd << " needs assertions; build with make (not make bench)\n";
+        return 1;
+    }
+#endif
 
     if (cmd == "test") {
         std::string data_dir = (argc > 0 && argv[0][0] != '-') ? argv[0] : "./data";
@@ -514,7 +583,10 @@ int main(int argc, char** argv) {
     }
 
     if (cmd == "tms-batch") {
-        return run_batch<TmsIndex>(argc, argv, read_tms_index);
+        // Only an smem-all report walks phi_inv, so other reports skip loading it.
+        return run_batch<TmsIndex>(argc, argv, [](const std::string& path) {
+            return read_tms_index(path, g_tms_report == TmsReport::SMEM_ALL);
+        });
     }
 
     if (cmd == "tms-build" || cmd == "tms-build-tsv") {
@@ -535,6 +607,7 @@ int main(int argc, char** argv) {
             if (strcmp(argv[i], "--lf-split") == 0 && i + 1 < argc) opts.lf_split = split_arg(argv[++i]);
             else if (strcmp(argv[i], "--fl-split") == 0 && i + 1 < argc) opts.fl_split = split_arg(argv[++i]);
             else if (strcmp(argv[i], "--phi-split") == 0 && i + 1 < argc) opts.phi_split = split_arg(argv[++i]);
+            else if (strcmp(argv[i], "--no-phi-inv") == 0) opts.phi_inv = false;
             else if (from_tsv && strcmp(argv[i], "--phi") == 0) with_phi = true;
             else if (!from_tsv && strcmp(argv[i], "--minima") == 0 && i + 1 < argc) { minima_path = argv[++i]; with_phi = true; }
             else if (!from_tsv && strcmp(argv[i], "--lcp-bin") == 0 && i + 1 < argc) { lcp_bin_path = argv[++i]; with_phi = true; }
