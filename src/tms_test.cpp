@@ -145,7 +145,8 @@ void check_phi(const TextBwt& t, const orbit::split_params& sp) {
     }
 }
 
-/** Texts from the families that found bugs in TeraMS, plus haplotype sets. */
+}  // namespace
+
 std::vector<std::string> fuzz_texts(std::mt19937& rng) {
     std::vector<std::string> texts;
     auto rnd = [&](size_t len, const char* alpha, size_t k) {
@@ -186,6 +187,8 @@ std::vector<std::string> fuzz_texts(std::mt19937& rng) {
     return texts;
 }
 
+namespace {
+
 /** Patterns drawn from T with mutations, some with N or absent bytes. */
 std::vector<std::string> fuzz_patterns(const std::string& T, std::mt19937& rng, int count) {
     std::vector<std::string> pats;
@@ -217,7 +220,7 @@ std::vector<TmsBuildOptions> split_variants() {
     TmsBuildOptions b;
     b.fl_split = orbit::NO_SPLITTING;
     TmsBuildOptions c;
-    c.lf_split = orbit::split_params{};
+    c.lf_split = orbit::split_params(orbit::DEFAULT_LENGTH_CAPPING, std::nullopt);
     TmsBuildOptions d;
     d.lf_split = orbit::split_params(std::nullopt, 2);
     d.fl_split = orbit::split_params(std::nullopt, 2);
@@ -857,7 +860,7 @@ bool throws(F f, const char* what) {
  * numbers of patterns in flight.  The LF columns a layout omits have width
  * 0, and the parts it omits are absent.  Queries that need a missing part are
  * refused, at load and at query time, and so are layouts given the wrong LCP
- * input.
+ * input, and unsplit LF.
  */
 bool test_layouts(const std::string& data_dir) {
     std::cout << "Testing psi and phi layouts and partial loads against the full layout" << std::endl;
@@ -945,6 +948,13 @@ bool test_layouts(const std::string& data_dir) {
                 [&] { tms_report_smems_batch(phi_noinv, len, pos, 0, TmsReport::SMEM_ALL, 8, hits); }, "phi_inv"));
             assert(throws<std::invalid_argument>([&] { TmsIndex(in.heads, in.lens, psi_opts, &in.tops); }, "psi layout"));
             assert(throws<std::invalid_argument>([&] { TmsIndex(in.heads, in.lens, phi_opts); }, "phi layout"));
+            for (TmsLayout layout : {TmsLayout::FULL, TmsLayout::PSI, TmsLayout::PHI}) {
+                TmsBuildOptions unsplit;
+                unsplit.layout = layout;
+                unsplit.lf_split = orbit::NO_SPLITTING;
+                const std::vector<ulint>* tops = layout == TmsLayout::PSI ? nullptr : &in.tops;
+                assert(throws<std::invalid_argument>([&] { TmsIndex(in.heads, in.lens, unsplit, tops); }, "LF must be split"));
+            }
         }
     }
     std::cout << "  " << compared << " batches PASSED" << std::endl;
