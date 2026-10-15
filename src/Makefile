@@ -21,6 +21,12 @@ bench: ms2-bench
 ms2-stats: $(MS_SRCS) $(MS_HDRS)
 	$(CXX) $(CXXFLAGS) -DNDEBUG -DMS_STATS -o ms2-stats $(MS_SRCS) -lz
 
+# Benchmark build that also records, for ms2 batch and tms-batch with
+# --interleave 0, where in each read the repositions, the rows they read and
+# the query time fall (see step_stats.hpp), as ms2-steps.
+ms2-steps: $(MS_SRCS) $(MS_HDRS)
+	$(CXX) $(CXXFLAGS) -DNDEBUG -DMS_STATS -DTMS_STATS -DMS_STEP_STATS -o ms2-steps $(MS_SRCS) -lz
+
 # Debug build: -O0 -g for breakpoints (e.g. lldb ./ms2, then run test ../data)
 debug: CXXFLAGS += -O0 -g
 debug: ms2
@@ -48,4 +54,4 @@ test-threads: ms2
 all: ms2
 
 clean:
-	rm -f ms2 ms2-bench ms2-stats tms_chain_bench read_chunks_test
+	rm -f ms2 ms2-bench ms2-stats ms2-steps tms_chain_bench read_chunks_test
