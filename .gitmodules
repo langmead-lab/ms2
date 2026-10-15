@@ -2,3 +2,7 @@
 	path = orbit
 	url = https://github.com/BenLangmead/runperm.git
 	branch = v3/lib-data-columns
+[submodule "teratools"]
+	path = teratools
+	url = https://github.com/BenLangmead/TeraTools.git
+	branch = tera/ms2

@@ -1,0 +1,2 @@
+# Debug symbols from ms2 builds on macOS
+*.dSYM

@@ -4,7 +4,9 @@ CXXFLAGS = -std=c++17 -I../orbit/include -I. -O3
 
 MS_SRCS = ms.cpp tsv.cpp ms_io.cpp ms_test.cpp inspect.cpp
 
-ms2: $(MS_SRCS)
+MS_HDRS = $(wildcard *.hpp) $(shell find ../orbit/include -name '*.hpp')
+
+ms2: $(MS_SRCS) $(MS_HDRS)
 	$(CXX) $(CXXFLAGS) -o ms2 $(MS_SRCS)
 
 # Debug build: -O0 -g for breakpoints (e.g. lldb ./ms2, then run test ../data)
