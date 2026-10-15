@@ -17,13 +17,19 @@
 #include "tms_smem.hpp"
 #include "tms_test.hpp"
 #include "perf_counters.hpp"
+#include "parallel_blocks.hpp"
+#include "read_chunks.hpp"
+#include "format_int.hpp"
+#include <zlib.h>
 #include <iostream>
 #include <string>
 #include <cstring>
 #include <cstdlib>
 #include <cctype>
+#include <atomic>
 #include <chrono>
 #include <fstream>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <type_traits>
@@ -54,6 +60,7 @@ static void usage(const char* prog) {
               << "  ms         INDEX_PATH PATTERN\n"
               << "              Compute matching statistics for PATTERN using INDEX_PATH.\n"
               << "  batch      INDEX_PATH READS [-o OUT] [--no-output] [--interleave K]\n"
+              << "            [--threads T] [--block-reads B] [--block-bytes N]\n"
               << "              Load the index once and compute matching statistics for every\n"
               << "              read in READS (FASTA, FASTQ, or one sequence per line, in\n"
               << "              which blank lines are skipped; - for stdin; LF or CRLF line\n"
@@ -63,8 +70,20 @@ static void usage(const char* prog) {
               << "              keeps K reads in flight, prefetching each one's next row\n"
               << "              (default 32); K = 0 queries one read at a time without\n"
               << "              prefetching (ms_query for batch, the batched engine with one\n"
-              << "              read for tms-batch).  Results do not depend on K.  A summary with\n"
-              << "              query time per base goes to stderr.\n"
+              << "              read for tms-batch).  --threads T (or -p T) queries on T\n"
+              << "              threads, each with its own K reads in flight (default 1; 0 uses\n"
+              << "              every CPU the process may run on).  Each thread takes a block\n"
+              << "              of about B reads at a time (--block-reads, default\n"
+              << "              max(512, 16K)), sized in bytes from the reads seen so far,\n"
+              << "              or of N bytes (--block-bytes).  Output named *.gz is written\n"
+              << "              gzip-compressed, by all threads (--gzip-level, default 1).\n"
+              << "              Results and their order do not depend on K, T or B.  On a\n"
+              << "              machine with several memory nodes (sockets), the index's\n"
+              << "              memory is interleaved over the nodes (Linux), unless numactl\n"
+              << "              sets a memory policy, as when running one process per node on\n"
+              << "              part of the reads (numactl -N i -m i).  A summary goes to stderr:\n"
+              << "              query_ns_per_base is the threads' summed query time per base,\n"
+              << "              and wall_ns_per_base the elapsed time per base.\n"
               << "  tms-build  HEADS LENS INDEX_PATH [--layout full|psi|phi] [--minima FILE]\n"
               << "            [--lcp-bin FILE] [--lf-split B] [--phi-split B] [--no-phi-inv]\n"
               << "              Build a tms index from an RLBWT: LF and psi, which need no LCP\n"
@@ -85,6 +104,7 @@ static void usage(const char* prog) {
               << "  tms-build-tsv TSV_PATH INDEX_PATH [--phi] [--layout ...] [split options]\n"
               << "              Same, taking the runs and their top LCPs from a TSV.\n"
               << "  tms-batch  INDEX_PATH READS [-o OUT] [--no-output] [--interleave K]\n"
+              << "            [--threads T] [--block-reads B] [--block-bytes N]\n"
               << "            [--mode psi|phi|phiskip|dual] [--positions]\n"
               << "            [--report ms|smem-one|smem-all] [--min-smem-len T]\n"
               << "            [--max-smem-positions N]\n"
@@ -130,68 +150,6 @@ static void usage(const char* prog) {
 }
 
 /**
- * Streaming reader for FASTA, FASTQ, or one sequence per line, chosen by the
- * first non-empty line.  Sequences are upper-cased; FASTA records may span
- * several lines.
- */
-class ReadStream {
-public:
-    explicit ReadStream(std::istream& in) : in_(in) {}
-
-    bool next(std::string& name, std::string& seq) {
-        name.clear();
-        seq.clear();
-        std::string line;
-        if (!have_line_) {
-            do {
-                if (!get_line(line)) return false;
-            } while (line.empty());
-            pending_ = line;
-            have_line_ = true;
-        }
-        if (format_ == 0) format_ = (pending_[0] == '>') ? 1 : (pending_[0] == '@') ? 2 : 3;
-        ++count_;
-        if (format_ == 3) {
-            seq = pending_;
-            name = "read" + std::to_string(count_);
-            have_line_ = false;
-        } else if (format_ == 2) {
-            name = header_name(pending_);
-            if (!get_line(seq)) return false;
-            get_line(line);  // +
-            get_line(line);  // qualities
-            have_line_ = false;
-        } else {
-            name = header_name(pending_);
-            have_line_ = false;
-            while (get_line(line)) {
-                if (!line.empty() && line[0] == '>') { pending_ = line; have_line_ = true; break; }
-                seq += line;
-            }
-        }
-        for (auto& ch : seq) ch = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-        return true;
-    }
-
-private:
-    // One line without its line ending, so CRLF files read like LF files.
-    bool get_line(std::string& line) {
-        if (!std::getline(in_, line)) return false;
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        return true;
-    }
-    static std::string header_name(const std::string& h) {
-        size_t end = h.find_first_of(" \t\r", 1);
-        return h.substr(1, end == std::string::npos ? std::string::npos : end - 1);
-    }
-    std::istream& in_;
-    std::string pending_;
-    bool have_line_ = false;
-    int format_ = 0;  // 1 FASTA, 2 FASTQ, 3 plain
-    size_t count_ = 0;
-};
-
-/**
  * The split parameters for --lf-split or --phi-split B: Orbit's default
  * length capping and balancing factor B, or none for B = 0.
  */
@@ -211,42 +169,64 @@ static bool lf_split_arg(const char* v, orbit::split_params& sp) {
     return false;
 }
 
-static std::vector<ulint> query_one(MSIndexSpillLCP<false>& idx, const std::string& s) { return ms_query(idx, s); }
-static void query_many(MSIndexSpillLCP<false>& idx, const std::vector<std::string>& p, size_t k,
-                       std::vector<std::vector<ulint>>& out) {
-    ms_query_batch(idx, p, k, out);
+/** Sets out to in compressed as one gzip member at the given level. */
+static void gzip_member(const std::string& in, std::string& out, int level) {
+    z_stream z{};
+    if (deflateInit2(&z, level, Z_DEFLATED, 15 + 16, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+        throw std::runtime_error("deflateInit2 failed");
+    out.resize(deflateBound(&z, static_cast<uLong>(in.size())));
+    z.next_in = reinterpret_cast<Bytef*>(const_cast<char*>(in.data()));
+    z.avail_in = static_cast<uInt>(in.size());
+    z.next_out = reinterpret_cast<Bytef*>(&out[0]);
+    z.avail_out = static_cast<uInt>(out.size());
+    const int r = deflate(&z, Z_FINISH);
+    const size_t n = z.total_out;
+    deflateEnd(&z);
+    if (r != Z_STREAM_END) throw std::runtime_error("deflate failed");
+    out.resize(n);
 }
-// tms-batch settings, from its command line.
+
+// One block's results, owned by one query thread.
+struct QueryResults {
+    std::vector<std::vector<ulint>> ms;
+    std::vector<std::vector<ulint>> pos;  // tms positions, with --positions or an SMEM report
+    std::vector<TmsSmemHits> hits;        // tms SMEMs, with an SMEM report
+};
+
+// Results of one read go to slot 0 of r.
+static void query_one(MSIndexSpillLCP<false>& idx, const std::string& s, QueryResults& r) {
+    r.ms.resize(1);
+    r.ms[0] = ms_query(idx, s);
+}
+static void query_many(MSIndexSpillLCP<false>& idx, const std::vector<std::string>& p, size_t k, QueryResults& r) {
+    ms_query_batch(idx, p, k, r.ms);
+}
+// tms-batch settings, from its command line.  They are read-only once the
+// queries start.
 static TmsMode g_tms_mode = TmsMode::PSI;
 static bool g_tms_positions = false;
 static TmsReport g_tms_report = TmsReport::MS;
 static ulint g_tms_min_smem_len = 0;
 static ulint g_tms_max_smem_positions = TMS_ALL_POSITIONS;
-static std::vector<std::vector<ulint>> g_tms_pos;
-static std::vector<TmsSmemHits> g_tms_hits;
 
 // With an SMEM report, the SMEMs are found as part of the query.  smem_k
 // walks are in flight when smem-all lists positions (0 lists them one SMEM
 // at a time).
-static void query_many(TmsIndex& idx, const std::vector<std::string>& p, size_t k,
-                       std::vector<std::vector<ulint>>& out, size_t smem_k) {
+static void query_many(TmsIndex& idx, const std::vector<std::string>& p, size_t k, QueryResults& r, size_t smem_k) {
     const bool smems = g_tms_report != TmsReport::MS;
-    tms_query_batch(idx, p, k, out, g_tms_mode, g_tms_positions || smems ? &g_tms_pos : nullptr);
+    tms_query_batch(idx, p, k, r.ms, g_tms_mode, g_tms_positions || smems ? &r.pos : nullptr);
     if (!smems) return;
-    tms_report_smems_batch(idx, out, g_tms_pos, g_tms_min_smem_len, g_tms_report, smem_k, g_tms_hits,
+    tms_report_smems_batch(idx, r.ms, r.pos, g_tms_min_smem_len, g_tms_report, smem_k, r.hits,
                            g_tms_max_smem_positions);
 }
-static void query_many(TmsIndex& idx, const std::vector<std::string>& p, size_t k,
-                       std::vector<std::vector<ulint>>& out) {
-    query_many(idx, p, k, out, k);
+static void query_many(TmsIndex& idx, const std::vector<std::string>& p, size_t k, QueryResults& r) {
+    query_many(idx, p, k, r, k);
 }
 // One read at a time runs the batched engine with one read: it is faster
 // than tms_query, the plain psi reference, whereas ms_query is as fast as
 // ms's engine with one read.  smem-all lists positions one SMEM at a time.
-static std::vector<ulint> query_one(TmsIndex& idx, const std::string& s) {
-    std::vector<std::vector<ulint>> len;
-    query_many(idx, {s}, 1, len, 0);
-    return std::move(len[0]);
+static void query_one(TmsIndex& idx, const std::string& s, QueryResults& r) {
+    query_many(idx, {s}, 1, r, 0);
 }
 
 // Read a tms index with the parts in *need, or every part it holds if need is null.
@@ -266,7 +246,9 @@ static std::optional<TmsIndex> read_tms_index(const std::string& path, const Tms
 
 /**
  * ms2 batch and tms-batch: load the index once, then compute matching
- * statistics for every read.
+ * statistics for every read, on one or more threads.  Each thread queries a
+ * block of reads at a time with its own K reads in flight, and output is
+ * written in input order, so it does not depend on the thread count.
  */
 template <typename Index>
 static int run_batch(int argc, char** argv, std::optional<Index> (*read)(const std::string&)) {
@@ -276,12 +258,21 @@ static int run_batch(int argc, char** argv, std::optional<Index> (*read)(const s
     }
     std::string idx_path = argv[0], reads_path = argv[1], out_path;
     bool write_output = true;
-    size_t interleave = 32;
+    size_t interleave = 32, threads = 1, block_reads = 0, block_bytes = 0;
+    int gzip_level = -2;  // -2: from the output name; -1: none
     for (int i = 2; i < argc; ++i) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) out_path = argv[++i];
         else if (strcmp(argv[i], "--no-output") == 0) write_output = false;
         else if (strcmp(argv[i], "--interleave") == 0 && i + 1 < argc)
             interleave = static_cast<size_t>(std::stoull(argv[++i]));
+        else if ((strcmp(argv[i], "--threads") == 0 || strcmp(argv[i], "-p") == 0) && i + 1 < argc)
+            threads = static_cast<size_t>(std::stoull(argv[++i]));
+        else if (strcmp(argv[i], "--block-reads") == 0 && i + 1 < argc)
+            block_reads = static_cast<size_t>(std::stoull(argv[++i]));
+        else if (strcmp(argv[i], "--gzip-level") == 0 && i + 1 < argc)
+            gzip_level = std::stoi(argv[++i]);
+        else if (strcmp(argv[i], "--block-bytes") == 0 && i + 1 < argc)
+            block_bytes = static_cast<size_t>(std::stoull(argv[++i]));
         else if (std::is_same_v<Index, TmsIndex> && strcmp(argv[i], "--positions") == 0) g_tms_positions = true;
         else if (std::is_same_v<Index, TmsIndex> && strcmp(argv[i], "--mode") == 0 && i + 1 < argc) {
             const std::string m = argv[++i];
@@ -304,13 +295,24 @@ static int run_batch(int argc, char** argv, std::optional<Index> (*read)(const s
             g_tms_max_smem_positions = static_cast<ulint>(std::stoull(argv[++i]));
         else { std::cerr << "Unknown batch option: " << argv[i] << "\n"; return 1; }
     }
+    threads = resolve_thread_count(threads);
+    // Output named *.gz is gzip-compressed, each block as a gzip member by
+    // the thread that formats it; members written one after another form one
+    // gzip file.
+    if (gzip_level == -2)
+        gzip_level = out_path.size() > 3 && out_path.compare(out_path.size() - 3, 3, ".gz") == 0 ? 1 : -1;
+    if (gzip_level > 9) gzip_level = 9;
     using clock = std::chrono::steady_clock;
     auto t0 = clock::now();
-    auto opt = read(idx_path);
+    auto opt = [&] {
+        InterleavedAllocation spread;
+        return read(idx_path);
+    }();
     if (!opt) {
         std::cerr << "Failed to load index: " << idx_path << "\n";
         return 1;
     }
+    Index& idx = *opt;
     const double load_s = std::chrono::duration<double>(clock::now() - t0).count();
 
     std::ifstream fin;
@@ -329,108 +331,189 @@ static int run_batch(int argc, char** argv, std::optional<Index> (*read)(const s
     }
     std::ios::sync_with_stdio(false);
 
-    ReadStream reads(*in);
-    std::string name, seq, line;
-    size_t n_reads = 0, n_bases = 0;
-    double query_s = 0.0;
-    PerfCounters perf;
-    auto t_all = clock::now();
+    // Query threads take turns reading a block of bytes into their own
+    // buffers and cutting it after its last whole record.  Blocks are sized
+    // in bytes, from the mean record size seen so far, to hold about
+    // block_reads reads (or block_bytes bytes, if given), and at most
+    // max_block_bytes unless one record is longer, so that long reads do not
+    // make a block's per-base results large.  The default keeps K reads in
+    // flight for all but the end of a block, and keeps blocks small enough
+    // to spread over many threads.
+    if (block_reads == 0) block_reads = std::max<size_t>(512, 16 * interleave);
+    constexpr size_t max_block_bytes = size_t(1) << 24;
+    ReadCutter cutter(*in);
+    std::atomic<size_t> seen_records{0}, seen_bytes{0};
+    auto target_bytes = [&]() -> size_t {
+        if (block_bytes > 0) return block_bytes;
+        const size_t r = seen_records.load(std::memory_order_relaxed), b = seen_bytes.load(std::memory_order_relaxed);
+        const size_t per = r > 0 ? std::max<size_t>(b / r, 1) : 160;
+        return std::min(std::max<size_t>(block_reads * per, size_t(1) << 16), max_block_bytes);
+    };
+
+    // A block's records are found by one thread at a time and parsed by the
+    // thread that queries them.
+    struct Block {
+        ReadBuffer buf;
+        ReadChunk chunk;
+        std::vector<std::string> names, seqs;
+    };
     // With --positions, a tab-separated field holds the positions (-1 for
     // none); with an SMEM report, a last one holds the SMEMs.
-    auto write_ms = [&](const std::string& nm, const std::vector<ulint>& ms, size_t j) {
-        line.clear();
-        line += nm;
-        line += '\t';
+    auto format = [&](std::string& text, const std::string& nm, const QueryResults& r, size_t j) {
+        const auto& ms = r.ms[j];
+        text += nm;
+        text += '\t';
         for (size_t i = 0; i < ms.size(); ++i) {
-            if (i > 0) line += ' ';
-            line += std::to_string(ms[i]);
-        }
-        if (std::is_same_v<Index, TmsIndex> && g_tms_positions) {
-            line += '\t';
-            const auto& pos = g_tms_pos[j];
-            for (size_t i = 0; i < pos.size(); ++i) {
-                if (i > 0) line += ' ';
-                line += pos[i] == TMS_NO_POS ? std::string("-1") : std::to_string(pos[i]);
-            }
+            if (i > 0) text += ' ';
+            append_uint(text, ms[i]);
         }
         if constexpr (std::is_same_v<Index, TmsIndex>) {
+            if (g_tms_positions) {
+                text += '\t';
+                const auto& pos = r.pos[j];
+                for (size_t i = 0; i < pos.size(); ++i) {
+                    if (i > 0) text += ' ';
+                    if (pos[i] == TMS_NO_POS) text += "-1";
+                    else append_uint(text, pos[i]);
+                }
+            }
             if (g_tms_report != TmsReport::MS) {
-                line += '\t';
-                tms_format_smems(g_tms_hits[j], g_tms_report, line);
+                text += '\t';
+                tms_format_smems(r.hits[j], g_tms_report, text);
             }
         }
-        line += '\n';
-        out->write(line.data(), static_cast<std::streamsize>(line.size()));
+        text += '\n';
     };
-    if (interleave == 0) {
-        // One read at a time with ms_query.
-        while (reads.next(name, seq)) {
+    struct Worker {
+        QueryResults r, one;
+        PerfCounters perf;
+        double query_s = 0.0, parse_s = 0.0, format_s = 0.0;
+        size_t reads = 0, bases = 0;
+        std::string packed;
+        std::function<void(Worker&, Block&, std::string&)> body;
+        void process(Block& b, std::string& text) { body(*this, b, text); }
+    };
+    auto body = [&](Worker& w, Block& b, std::string& text) {
+        auto tp = clock::now();
+        const size_t n = parse_chunk(b.chunk, b.names, b.seqs);
+        b.names.resize(n);
+        b.seqs.resize(n);
+        w.parse_s += std::chrono::duration<double>(clock::now() - tp).count();
+        w.reads += n;
+        for (const auto& sq : b.seqs) w.bases += sq.size();
+        seen_records.fetch_add(n, std::memory_order_relaxed);
+        seen_bytes.fetch_add(b.chunk.size, std::memory_order_relaxed);
+        auto timed = [&](auto&& f) {
             auto tq = clock::now();
-            perf.start();
-            auto ms = query_one(*opt, seq);
-            perf.stop();
-            query_s += std::chrono::duration<double>(clock::now() - tq).count();
-            ++n_reads;
-            n_bases += seq.size();
-            if (write_output) write_ms(name, ms, 0);
+            w.perf.start();
+            f();
+            w.perf.stop();
+            w.query_s += std::chrono::duration<double>(clock::now() - tq).count();
+        };
+        if (interleave == 0) {
+            // One read at a time, without prefetching.  The block is timed
+            // as a whole, so that timing each read does not add to it.
+            const size_t n_reads = b.seqs.size();
+            timed([&] {
+                w.r.ms.resize(n_reads);
+                for (size_t j = 0; j < n_reads; ++j) {
+                    query_one(idx, b.seqs[j], w.one);
+                    w.r.ms[j] = std::move(w.one.ms[0]);
+                    if (!w.one.pos.empty()) {
+                        w.r.pos.resize(n_reads);
+                        w.r.pos[j] = std::move(w.one.pos[0]);
+                    }
+                    if (!w.one.hits.empty()) {
+                        w.r.hits.resize(n_reads);
+                        w.r.hits[j] = std::move(w.one.hits[0]);
+                    }
+                }
+            });
+        } else {
+            timed([&] { query_many(idx, b.seqs, interleave, w.r); });
         }
-    } else {
-        // Blocks of reads with ms_query_batch, interleave reads in flight.
-        // A block ends at `block` reads or once it holds block_bases bases,
-        // so that long reads do not make a block's per-base results large.
-        const size_t block = std::max<size_t>(4096, 64 * interleave);
-        constexpr size_t block_bases = size_t(1) << 24;
-        std::vector<std::string> names, seqs;
-        std::vector<std::vector<ulint>> results;
-        bool more = true;
-        while (more) {
-            names.clear();
-            seqs.clear();
-            size_t bases = 0;
-            while (seqs.size() < block && bases < block_bases && (more = reads.next(name, seq))) {
-                names.push_back(name);
-                seqs.push_back(seq);
-                n_bases += seq.size();
-                bases += seq.size();
+        if (write_output) {
+            auto tf = clock::now();
+            for (size_t j = 0; j < b.seqs.size(); ++j) format(text, b.names[j], w.r, j);
+            if (gzip_level >= 0) {
+                gzip_member(text, w.packed, gzip_level);
+                text.swap(w.packed);
             }
-            if (seqs.empty()) break;
-            auto tq = clock::now();
-            perf.start();
-            query_many(*opt, seqs, interleave, results);
-            perf.stop();
-            query_s += std::chrono::duration<double>(clock::now() - tq).count();
-            n_reads += seqs.size();
-            if (write_output)
-                for (size_t j = 0; j < seqs.size(); ++j) write_ms(names[j], results[j], j);
+            w.format_s += std::chrono::duration<double>(clock::now() - tf).count();
         }
-    }
-    out->flush();
+    };
+    PerfCounters perf;
+    double query_s = 0.0, read_s = 0.0, parse_s = 0.0, format_s = 0.0;
+    size_t n_reads = 0, n_bases = 0;
 #ifdef TMS_STATS
-    std::cerr << "stats: bases=" << tms_stats.bases << " repositions/base=" << double(tms_stats.repositions) / tms_stats.bases
-              << " psi_steps/base=" << double(tms_stats.psi_steps) / tms_stats.bases
-              << " scan_rows/rep=" << double(tms_stats.scan_rows) / tms_stats.repositions
-              << " len/rep=" << double(tms_stats.len_at_rep) / tms_stats.repositions
-              << " phi_steps/base=" << double(tms_stats.phi_steps) / tms_stats.bases
-              << " dist/rep=" << double(tms_stats.dist) / tms_stats.repositions
-              << " dist1_frac=" << double(tms_stats.dist1) / tms_stats.repositions
-              << " lce/rep=" << double(tms_stats.lce) / tms_stats.repositions
-              << " capped_frac=" << double(tms_stats.lce_capped) / tms_stats.repositions
-              << " scan_visits/rep=" << double(tms_stats.scan_visits) / tms_stats.repositions
-              << " lf_ff/step=" << double(tms_stats.lf_ff) / tms_stats.lf_steps
-              << " walk_visits/base=" << double(tms_stats.walk_visits) / tms_stats.bases << "\n";
+    TmsStats tms_total;
 #endif
 #ifdef MS_STATS
-    std::cerr << "stats: bases=" << n_bases << " repositions/base=" << double(ms_stats.repositions) / n_bases
-              << " lf_ff/step=" << double(ms_stats.lf_ff) / ms_stats.lf_steps
-              << " walk_up/rep=" << double(ms_stats.walk_up) / ms_stats.repositions
-              << " walk_down/rep=" << double(ms_stats.walk_down) / ms_stats.repositions << "\n";
+    MsStats ms_total;
+#endif
+    auto t_all = clock::now();
+    run_parallel_blocks<Block>(
+        threads, 4 * threads,
+        [&](size_t) { Worker w; w.body = body; return w; },
+        [&](Block& b) {
+            auto tr = clock::now();
+            const bool got = cutter.next(b.buf, b.chunk, target_bytes());
+            read_s += std::chrono::duration<double>(clock::now() - tr).count();
+            return got;
+        },
+        [&](const std::string& text) {
+            if (write_output) out->write(text.data(), static_cast<std::streamsize>(text.size()));
+        },
+        [&](Worker& w) {
+            perf.add(w.perf);
+            query_s += w.query_s;
+            parse_s += w.parse_s;
+            format_s += w.format_s;
+            n_reads += w.reads;
+            n_bases += w.bases;
+#ifdef TMS_STATS
+            tms_total += tms_stats;
+#endif
+#ifdef MS_STATS
+            ms_total += ms_stats;
+#endif
+        });
+    out->flush();
+    const double total_s = std::chrono::duration<double>(clock::now() - t_all).count();
+#ifdef TMS_STATS
+    {
+        const TmsStats& tms_stats = tms_total;
+        std::cerr << "stats: bases=" << tms_stats.bases << " repositions/base=" << double(tms_stats.repositions) / tms_stats.bases
+                  << " psi_steps/base=" << double(tms_stats.psi_steps) / tms_stats.bases
+                  << " scan_rows/rep=" << double(tms_stats.scan_rows) / tms_stats.repositions
+                  << " len/rep=" << double(tms_stats.len_at_rep) / tms_stats.repositions
+                  << " phi_steps/base=" << double(tms_stats.phi_steps) / tms_stats.bases
+                  << " dist/rep=" << double(tms_stats.dist) / tms_stats.repositions
+                  << " dist1_frac=" << double(tms_stats.dist1) / tms_stats.repositions
+                  << " lce/rep=" << double(tms_stats.lce) / tms_stats.repositions
+                  << " capped_frac=" << double(tms_stats.lce_capped) / tms_stats.repositions
+                  << " scan_visits/rep=" << double(tms_stats.scan_visits) / tms_stats.repositions
+                  << " lf_ff/step=" << double(tms_stats.lf_ff) / tms_stats.lf_steps
+                  << " walk_visits/base=" << double(tms_stats.walk_visits) / tms_stats.bases << "\n";
+    }
+#endif
+#ifdef MS_STATS
+    std::cerr << "stats: bases=" << n_bases << " repositions/base=" << double(ms_total.repositions) / n_bases
+              << " lf_ff/step=" << double(ms_total.lf_ff) / ms_total.lf_steps
+              << " walk_up/rep=" << double(ms_total.walk_up) / ms_total.repositions
+              << " walk_down/rep=" << double(ms_total.walk_down) / ms_total.repositions << "\n";
 #endif
     perf.report(std::cerr, n_bases);
-    const double total_s = std::chrono::duration<double>(clock::now() - t_all).count();
-    std::cerr << "batch: reads=" << n_reads << " bases=" << n_bases
-              << " index_load_s=" << load_s << " query_s=" << query_s
+    // query_s sums the threads' time in queries, parse_s their time
+    // parsing reads, and format_s their time formatting (and compressing)
+    // output.  read_s is the time the input lock was held for reading; wall_ns_per_base is
+    // the elapsed time of the whole read, query and write phase per base.
+    std::cerr << "batch: reads=" << n_reads << " bases=" << n_bases << " threads=" << threads
+              << " index_load_s=" << load_s << " query_s=" << query_s << " read_s=" << read_s
+              << " parse_s=" << parse_s << " format_s=" << format_s
               << " total_s=" << total_s
-              << " query_ns_per_base=" << (n_bases ? query_s * 1e9 / n_bases : 0.0) << "\n";
+              << " query_ns_per_base=" << (n_bases ? query_s * 1e9 / n_bases : 0.0)
+              << " wall_ns_per_base=" << (n_bases ? total_s * 1e9 / n_bases : 0.0) << "\n";
     return 0;
 }
 
