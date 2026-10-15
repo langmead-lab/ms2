@@ -60,7 +60,7 @@ struct Stats {
  */
 template <typename Heads, typename Lens>
 inline orbit::int_vector split_row_lengths(const Heads& heads, const Lens& lens, const orbit::split_params& sp) {
-    using Enc = orbit::rlbwt::rlbwt_interval_encoding<>;
+    using Enc = orbit::rlbwt::rlbwt_interval_encoding<ms_alpha::alphabet>;
     const Enc enc = Enc::lf_interval_encoding(heads, lens, sp);
     ulint max_len = 0;
     for (ulint k = 0; k < enc.intervals(); ++k) max_len = std::max(max_len, enc.get_length(k));
@@ -407,7 +407,7 @@ inline MSIndexSpillLCP<SP> build(std::vector<uchar>&& heads_in, std::vector<ulin
 
     // The rows' heads, and their encoding as runs of their own.
     using Impl = typename MSIndexSpillLCP<SP>::Impl;
-    using Enc = orbit::rlbwt::rlbwt_interval_encoding<>;
+    using Enc = orbit::rlbwt::rlbwt_interval_encoding<ms_alpha::alphabet>;
     Enc enc;
     {
         std::vector<uchar> row_heads(R);
