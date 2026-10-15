@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cassert>
+#include <cstring>
 #include <iostream>
 #include <numeric>
 #include <random>
@@ -1062,7 +1063,7 @@ bool test_layouts(const std::string& data_dir) {
             assert(throws<std::invalid_argument>([&] { tms_query_batch(psi, pats, 8, len, TmsMode::PSI, &pos); }, "phi"));
             assert(throws<std::invalid_argument>([&] { tms_query_batch(phi_len, pats, 8, len, TmsMode::PHI, &pos); },
                                                  "starts-based"));
-            assert(throws<std::logic_error>([&] { round_trip(phi_len); }, "one form of phi"));
+            assert(throws<std::logic_error>([&] { round_trip(phi_len); }, "only some of its parts"));
             tms_query_batch(phi_noinv, pats, 8, len, TmsMode::PHI, &pos);
             std::vector<TmsSmemHits> hits;
             assert(throws<std::invalid_argument>(
@@ -1275,6 +1276,88 @@ void check_phi_against(TmsIndex& idx, const std::vector<ulint>& sa, const std::v
  * occurrence.  Samples that do not fit the RLBWT, and samples with the psi
  * layout, are refused.
  */
+namespace {
+/** A stream buffer over a string that cannot seek, as a pipe. */
+struct NoSeekBuf : std::streambuf {
+    explicit NoSeekBuf(std::string& s) { setg(&s[0], &s[0], &s[0] + s.size()); }
+};
+}  // namespace
+
+/**
+ * The ORBITIDX header of a tms index: its sections agree with the index, a
+ * load reads the sections its query needs and refuses a header whose column
+ * codes disagree with the code, a load skips sections on a stream that cannot
+ * seek, and a truncated file is refused.
+ */
+bool test_index_format() {
+    std::cout << "Testing the ORBITIDX header of tms indexes" << std::endl;
+    using namespace orbit_idx;
+    TextBwt t = make_text_bwt("ACGTTGCAACGGATTACAGATTACAACGTACGTTTGCA");
+    TmsIndex idx(t.heads, t.lens, TmsBuildOptions{}, samples_for(t.heads, t.lens, t.sa, t.lcp));
+    idx.set_info("built_by=test\n");
+    std::stringstream ss;
+    idx.serialize(ss);
+    const std::string file = ss.str();
+    const Header h = decode_header(file.data());
+    assert(h.tool == Tool::TMS && h.layout == Layout::FULL && h.n == idx.domain() && h.bwt_runs == idx.bwt_runs());
+    assert(h.sections.size() == 5 && h.info == "built_by=test\n");
+    const SectionEntry* lf = h.find(Section::LF);
+    assert(lf && lf->rows == idx.lf().intervals() && lf->cols.size() == 8);
+    assert(lf->cols[4].first == static_cast<uint8_t>(Col::PSI_INT) && lf->cols[4].second == idx.lf().get_widths()[4]);
+    for (const auto& e : h.sections) assert(e.offset % SECTION_ALIGN == 0);
+    assert(file.size() == h.sections.back().offset + h.sections.back().bytes);
+    // What a query loads.
+    const uint32_t lf_bit = section_bit(Section::LF);
+    assert(TmsIndex::sections_for(TmsParts{}) == lf_bit);
+    assert(TmsIndex::sections_for(TmsParts{true, false, false, false}) == (lf_bit | section_bit(Section::F_STARTS)));
+    assert(TmsIndex::sections_for(TmsParts{false, true, false, false}) == (lf_bit | section_bit(Section::PHI_LEN)));
+    assert(TmsIndex::sections_for(TmsParts{false, true, true, true}) ==
+           (lf_bit | section_bit(Section::PHI_START) | section_bit(Section::PHI_INV)));
+    assert(TmsIndex::sections_for(TmsParts{false, false, true, false}) == lf_bit);
+    {
+        std::stringstream in(file);
+        TmsIndex x;
+        x.load(in, TmsParts{false, true, true, true});
+        const SectionEntry* st = h.find(Section::PHI_START);
+        const SectionEntry* inv = h.find(Section::PHI_INV);
+        assert(x.has_phi_starts() && !x.has_phi_lengths() && x.has_phi_inv());
+        assert(x.start_table_bytes() == TmsIndex::start_table_bytes(st->domain, st->rows) +
+                                            TmsIndex::start_table_bytes(inv->domain, inv->rows));
+    }
+
+    const TmsParts phi_need{false, true, false, false};
+    // A column code other than the one this build reads.
+    std::string bad_col = file;
+    bad_col[FIXED_BYTES + 48 + 2 * 4] = static_cast<char>(Col::PLCP);
+    {
+        std::stringstream in(bad_col);
+        TmsIndex x;
+        assert(throws<std::runtime_error>([&] { x.load(in, phi_need); }, "has column plcp where this build reads psi_int"));
+    }
+    // Skipping sections on a stream that cannot seek reads past them.
+    for (const TmsParts& need : {phi_need, TmsParts{false, true, true, true}, TmsParts{true, false, false, false}}) {
+        std::string copy = file;
+        NoSeekBuf buf(copy);
+        std::istream in(&buf);
+        TmsIndex piped, seeked;
+        piped.load(in, need);
+        std::stringstream again(file);
+        seeked.load(again, need);
+        std::ostringstream a, b;
+        piped.describe(a);
+        seeked.describe(b);
+        assert(a.str() == b.str());
+    }
+    // A truncated file.
+    {
+        std::stringstream in(file.substr(0, file.size() - 100));
+        TmsIndex x;
+        assert(throws<std::runtime_error>([&] { x.load(in); }, "truncated"));
+    }
+    std::cout << "  " << h.sections.size() << " sections PASSED" << std::endl;
+    return true;
+}
+
 bool test_phi_import() {
     std::cout << "Testing phi and phi_inv from imported samples" << std::endl;
     std::mt19937 rng(61);
@@ -1418,6 +1501,8 @@ bool run_all_tests(const std::string& data_dir) {
     test_lf_rows(data_dir);
     std::cout << std::endl;
     test_phi_import();
+    std::cout << std::endl;
+    test_index_format();
     std::cout << std::endl;
     std::cout << (all_ran ? "All tms_test checks PASSED" : "SOME TMS TESTS NOT RUN") << std::endl;
     return all_ran;
