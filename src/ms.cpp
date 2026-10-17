@@ -59,15 +59,14 @@ static void usage(const char* prog) {
     std::cerr << "Usage: " << prog << " <cmd> [args...]\n"
               << "\n"
               << "Main commands:\n"
-              << "  build      TSV_PATH INDEX_PATH [--percentile K] [--split-threshold N]\n"
-              << "            [--coalesce-spillover] [--spill-align N] [--spill-split-bits X]\n"
+              << "  build      TSV_PATH INDEX_PATH [--percentile K] [--coalesce-spillover]\n"
+              << "            [--spill-align N] [--spill-split-bits X]\n"
               << "            [--minima-only] [--lf-split B]\n"
-              << "              Build index from TSV.  LF is always split: the rows (runs, or\n"
-              << "              their pieces after --split-threshold) are cut into LF intervals\n"
-              << "              with Orbit's default length capping and balancing, each with\n"
-              << "              its own LCP data.  --lf-split B sets the balancing factor\n"
-              << "              (default: Orbit's default balancing); it must be positive.\n"
-              << "              Results do not depend on B.\n"
+              << "              Build index from TSV.  LF is always split: the runs are cut\n"
+              << "              into LF intervals with Orbit's default length capping and\n"
+              << "              balancing, each with its own LCP data.  --lf-split B sets\n"
+              << "              the balancing factor (default: Orbit's default balancing); it\n"
+              << "              must be positive.  Results do not depend on B.\n"
               << "  build-rlbwt HEADS LENS INDEX_PATH (--minima FILE | --lcp-bin FILE)\n"
               << "            [--minima-only] [--percentile K] [--coalesce-spillover]\n"
               << "            [--spill-align N] [--spill-split-bits X] [--lf-split B]\n"
@@ -270,7 +269,7 @@ static void usage(const char* prog) {
               << "  discover       [DATA_DIR]\n"
               << "                  Find patterns where index types disagree with base.\n"
               << "  investigate    DATA_DIR PATTERN [INDEX_TYPE] [TRACE_STEP]\n"
-              << "                  Step-through trace (INDEX_TYPE: base|coal_split|multispill2..10).\n"
+              << "                  Step-through trace (INDEX_TYPE: base|coal|multispill2..10).\n"
               << "  probe          DATA_DIR FIRST_ROW LAST_ROW\n"
               << "                  Compare boundary/row_min/range_min for raw vs compressed vs index.\n"
               << "  probe-internal DATA_DIR FIRST_ROW LAST_ROW\n"
@@ -993,7 +992,6 @@ int main(int argc, char** argv) {
         }
         std::string tsv_path = argv[0], idx_path = argv[1];
         double percentile_k = 0.98;
-        ulint split_threshold = SPLIT_THRESHOLD_NEVER;
         bool coalesce = false;
         ulint spill_align = 0;
         uchar spill_split_bits = 0;
@@ -1002,8 +1000,6 @@ int main(int argc, char** argv) {
         for (int i = 2; i < argc; ++i) {
             if (strcmp(argv[i], "--percentile") == 0 && i + 1 < argc) {
                 percentile_k = std::stod(argv[++i]);
-            } else if (strcmp(argv[i], "--split-threshold") == 0 && i + 1 < argc) {
-                split_threshold = std::stoull(argv[++i]);
             } else if (strcmp(argv[i], "--coalesce-spillover") == 0) {
                 coalesce = true;
             } else if (strcmp(argv[i], "--spill-align") == 0 && i + 1 < argc) {
@@ -1027,7 +1023,6 @@ int main(int argc, char** argv) {
             return 1;
         }
         const size_t runs = bwt_heads.size();
-        apply_lcp_splitting(bwt_heads, bwt_run_lengths, lcps_per_run, split_threshold, minima_only);
         ms_build::Options bo;
         bo.percentile_k = percentile_k;
         bo.coalesce = coalesce;

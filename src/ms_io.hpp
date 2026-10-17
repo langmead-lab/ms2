@@ -20,13 +20,11 @@ namespace ms_io {
 /** Options for building an MS index from TSV. */
 struct BuildOptions {
     double percentile_k = 0.98;
-    ulint split_threshold = SPLIT_THRESHOLD_NEVER;
     bool coalesce = false;
     ulint spill_align = 0;
     uchar spill_split_bits = 0;
     bool minima_only = false;
-    // Orbit's LF splitting, applied after LCP splitting (see
-    // apply_lf_splitting); it must split.
+    // Orbit's LF splitting (see apply_lf_splitting); it must split.
     orbit::split_params lf_split = orbit::split_params{};
 };
 
@@ -50,7 +48,6 @@ template <bool StoreAbsolutePositions = false>
 inline MSIndexSpillLCP<StoreAbsolutePositions>
 build_ms_index_spill(std::vector<uchar> bwt_heads, std::vector<ulint> bwt_run_lengths,
                      std::vector<std::vector<ulint>> lcps_per_run, const BuildOptions& opts) {
-    apply_lcp_splitting(bwt_heads, bwt_run_lengths, lcps_per_run, opts.split_threshold, opts.minima_only);
     return ms_build::build<StoreAbsolutePositions>(std::move(bwt_heads), std::move(bwt_run_lengths),
                                                    ms_build::lcp_vectors_source(lcps_per_run, opts.minima_only),
                                                    build_options(opts));

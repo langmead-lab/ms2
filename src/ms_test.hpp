@@ -20,7 +20,7 @@ bool run_all_tests(const std::string& data_dir);
 /**
  * Trace ms_query step-by-step for a pattern (no assertions). For debugging.
  * Uses minishred1_20_002_lcp.tsv from data_dir.
- * index_type: "base" (default), "coal_split", "multispill2".."multispill10".
+ * index_type: "base" (default), "coal", "multispill2".."multispill10".
  * trace_reposition_at: if >= 0, when we hit that backward step index, print
  *   detailed reposition path (min_up, min_down, LCP values per run).
  */

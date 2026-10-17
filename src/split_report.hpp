@@ -249,7 +249,7 @@ inline int report_ms(const std::string& path, size_t threads, std::ostream& os) 
     f.runs_stored = lf.runs();
     f.runs_split = count_runs(m, [&](ulint i) { return rd.template get<CHR>(i); });
     f.runs_split_what = "BWT runs, maximal runs of one character in the rows; LF splitting ran on these runs as "
-                        "given to the build, which LCP splitting may have cut further";
+                        "given to the build";
     if (f.stored == orbit::NO_SPLITTING)
         f.note = "the format stores no LF split parameters: LF is built with NO_SPLITTING on rows that "
                  "apply_lf_splitting already cut with the build's --lf-split (default length capping 8, "

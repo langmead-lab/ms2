@@ -212,113 +212,6 @@ inline uchar ceil_log2(ulint v) {
 
 }  // namespace detail
 
-// Constant for when we don't want to split at all
-constexpr ulint SPLIT_THRESHOLD_NEVER = std::numeric_limits<ulint>::max();
-
-/**
- * Compute the compression "improvement" of an LCP vector, which is equal to
- * the number of LCPs that are ignored.
- */
-inline size_t compression_improvement(const std::vector<ulint>& lcp,
-                                      const std::vector<ulint>* lcp_next,
-                                      bool minima_only = false)
-{
-    if (lcp.size() < 2) return 0;
-    auto keep = lcp_keep_mask(lcp, lcp_next, minima_only);
-    size_t c = 0;
-    for (size_t i = 1; i < lcp.size(); ++i)
-        if (!keep[i]) ++c;
-    return c;
-}
-
-/**
- * Attempt to split an LCP vector at its minimum (if not top or bottom) into
- * two parts for better compression. Returns (did_split, top_part, bottom_part);
- * if no split, returns (False, lcp, empty).
- */
-inline std::tuple<bool, std::vector<ulint>, std::vector<ulint>>
-possibly_split_lcps(const std::vector<ulint>& lcp,
-                    const std::vector<ulint>* lcp_next,
-                    ulint split_threshold = SPLIT_THRESHOLD_NEVER,
-                    bool minima_only = false)
-{
-    std::vector<ulint> empty;
-    if (lcp.size() < 3) return {false, lcp, empty};
-    ulint min_val = lcp[1];
-    for (size_t i = 2; i + 1 < lcp.size(); ++i)
-        min_val = std::min(min_val, lcp[i]);
-    std::vector<size_t> candidates;
-    for (size_t i = 1; i + 1 < lcp.size(); ++i)
-        if (lcp[i] == min_val) candidates.push_back(i);
-    size_t mid = lcp.size() / 2;
-    size_t min_idx = candidates[0];
-    size_t best = (candidates[0] >= mid) ? (candidates[0] - mid) : (mid - candidates[0]);
-    for (size_t c : candidates) {
-        size_t d = (c >= mid) ? (c - mid) : (mid - c);
-        if (d < best) { best = d; min_idx = c; }
-    }
-    std::vector<ulint> top(lcp.begin(), lcp.begin() + static_cast<ptrdiff_t>(min_idx));
-    std::vector<ulint> bot;
-    bot.reserve(lcp.size() - min_idx);
-    bot.push_back(min_val);
-    for (size_t i = min_idx + 1; i < lcp.size(); ++i) bot.push_back(lcp[i]);
-    size_t base_imp = compression_improvement(lcp, lcp_next, minima_only);
-    size_t top_imp = compression_improvement(top, &bot, minima_only);
-    size_t bot_imp = compression_improvement(bot, lcp_next, minima_only);
-    size_t gain = (top_imp + bot_imp > base_imp) ? (top_imp + bot_imp - base_imp) : 0;
-    if (gain > split_threshold) return {true, std::move(top), std::move(bot)};
-    return {false, lcp, empty};
-}
-
-namespace detail {
-
-/**
- * Recursively split an LCP vector.  The recursion helps to check if the
- * partitions from one split should themselves be split.
- */
-inline void recursive_split_lcps(const std::vector<ulint>& lcp,
-                                 const std::vector<ulint>* lcp_next,
-                                 size_t orig_i, ulint split_threshold,
-                                 std::vector<std::pair<std::vector<ulint>, size_t>>& out,
-                                 bool minima_only = false)
-{
-    if (lcp.size() < 3) { out.emplace_back(lcp, orig_i); return; }
-    auto [did, top, bot] = possibly_split_lcps(lcp, lcp_next, split_threshold, minima_only);
-    if (!did || bot.empty()) { out.emplace_back(lcp, orig_i); return; }
-    recursive_split_lcps(top, &bot, orig_i, split_threshold, out, minima_only);
-    recursive_split_lcps(bot, lcp_next, orig_i, split_threshold, out, minima_only);
-}
-
-}  // namespace detail
-
-/**
- * Apply LCP splitting to the LCP vectors for each run.
- */
-inline void apply_lcp_splitting(std::vector<uchar>& bwt_heads,
-                               std::vector<ulint>& bwt_run_lengths,
-                               std::vector<std::vector<ulint>>& lcps_per_run,
-                               ulint split_threshold,
-                               bool minima_only = false) {
-    if (split_threshold == SPLIT_THRESHOLD_NEVER || lcps_per_run.empty()) return;
-    const size_t n = lcps_per_run.size();
-    std::vector<std::pair<std::vector<ulint>, size_t>> new_lcps;
-    for (size_t i = 0; i < n; ++i) {
-        const std::vector<ulint>* next = (i + 1 < n) ? &lcps_per_run[i + 1] : nullptr;
-        detail::recursive_split_lcps(lcps_per_run[i], next, i, split_threshold, new_lcps, minima_only);
-    }
-    std::vector<uchar> nh;
-    std::vector<ulint> nl;
-    std::vector<std::vector<ulint>> nlcps;
-    for (const auto& [lcp, oi] : new_lcps) {
-        nh.push_back(bwt_heads[oi]);
-        nl.push_back(static_cast<ulint>(lcp.size()));
-        nlcps.push_back(lcp);
-    }
-    bwt_heads = std::move(nh);
-    bwt_run_lengths = std::move(nl);
-    lcps_per_run = std::move(nlcps);
-}
-
 /**
  * Compute the maximum value for an unsigned integer using the given number of
  * bits.
@@ -409,8 +302,7 @@ inline void check_lf_split(const orbit::split_params& sp) {
  * balanced LF intervals, each with LCP data of its own.  sp must split (see
  * check_lf_split).  heads and lens become the rows'
  * and pairs, each run's retained LCP pairs (as from retained_lcp_pairs or a
- * minima file), become each row's.  Rows may be runs already cut by
- * apply_lcp_splitting; they are cut further.
+ * minima file), become each row's.
  *
  * A row cut from inside a run at offset a needs a top LCP, which the
  * retained pairs need not hold.  It gets max(u, d), where u is the minimum of
@@ -658,8 +550,6 @@ build_spill_data_from_pairs(std::vector<RunLcpPairs> all_pairs,
 
 /**
  * Build the full spillover data for the index from full per-row LCP vectors.
- * split_threshold is accepted for interface compatibility; splitting is
- * applied beforehand by apply_lcp_splitting.
  */
 inline std::tuple<
     std::vector<std::array<ulint, static_cast<size_t>(LCPSpillRunCols::COUNT)>>,
@@ -668,12 +558,10 @@ build_spill_data(const std::vector<std::vector<ulint>>& lcps_per_run,
                  double percentile_k = 0.98,
                  bool coalesce_spillover = false,
                  bool coalesce_lcp_separately = false,
-                 ulint split_threshold = SPLIT_THRESHOLD_NEVER,
                  ulint spill_align = 0,
                  uchar spill_split_bits = 0,
                  bool minima_only = false)
 {
-    (void)split_threshold;
     return build_spill_data_from_pairs(retained_lcp_pairs(lcps_per_run, minima_only), percentile_k,
                                        coalesce_spillover, coalesce_lcp_separately, spill_align,
                                        spill_split_bits);

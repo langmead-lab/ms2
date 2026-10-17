@@ -36,14 +36,12 @@ namespace {
  * in the order in which they appear in the buffer.
  */
 /**
- * A reference index whose rows are the runs, after any LCP splitting, with
- * no LF splitting: the LCP probes relate its rows to the TSV's runs, and
+ * A reference index whose rows are the runs, with no LF splitting: the LCP probes relate its rows to the TSV's runs, and
  * test_lf_split compares split indexes with it.  Builds for users always
  * split LF.
  */
 static MSIndexSpillLCP<false> unsplit_index(std::vector<uchar> heads, std::vector<ulint> lens,
                                             std::vector<std::vector<ulint>> lcps, const ms_io::BuildOptions& o) {
-    apply_lcp_splitting(heads, lens, lcps, o.split_threshold, o.minima_only);
     auto [run_data, spill, max_top, max_sub, skinny, jumbo] = build_spill_data_from_pairs(
         retained_lcp_pairs(lcps, o.minima_only), o.percentile_k, o.coalesce, false, o.spill_align,
         o.spill_split_bits);
@@ -328,7 +326,7 @@ void test_orient_conversion() {
 
 /**
  * Trace the reposition path (up and down) and print LCP values at each run.
- * Helps diagnose why base under-reports vs coal_split.
+ * Helps diagnose why base under-reports vs coal.
  */
 static void trace_reposition_path(MSIndexSpillLCP<false>& idx, ulint interval, ulint offset,
                                   uchar c, std::ostream& out) {
@@ -570,26 +568,23 @@ bool test_ms_query_vs_naive_mutated(const std::string& data_dir) {
 
     struct Config { const char* name; ms_io::BuildOptions opts; };
     std::vector<Config> configs;
-    auto add = [&](const char* name, bool coalesce, ulint align, uchar split_bits, ulint split_threshold,
-                   bool minima_only = false) {
+    auto add = [&](const char* name, bool coalesce, ulint align, uchar split_bits, bool minima_only = false) {
         ms_io::BuildOptions o;
         o.coalesce = coalesce;
         o.spill_align = align;
         o.spill_split_bits = split_bits;
-        o.split_threshold = split_threshold;
         o.minima_only = minima_only;
         configs.push_back({name, o});
     };
-    add("base", false, 0, 0, SPLIT_THRESHOLD_NEVER);
-    add("align4", false, 4, 0, SPLIT_THRESHOLD_NEVER);
-    add("coalesce", true, 0, 0, SPLIT_THRESHOLD_NEVER);
-    add("coalesce+align2", true, 2, 0, SPLIT_THRESHOLD_NEVER);
-    add("coalesce+align4", true, 4, 0, SPLIT_THRESHOLD_NEVER);
-    add("coalesce+align8+splitbits2", true, 8, 2, SPLIT_THRESHOLD_NEVER);
-    add("coalesce+split1+align4", true, 4, 0, 1);
-    add("minima", false, 0, 0, SPLIT_THRESHOLD_NEVER, true);
-    add("minima+coalesce+align4", true, 4, 0, SPLIT_THRESHOLD_NEVER, true);
-    add("minima+coalesce+split1+align8+splitbits2", true, 8, 2, 1, true);
+    add("base", false, 0, 0);
+    add("align4", false, 4, 0);
+    add("coalesce", true, 0, 0);
+    add("coalesce+align2", true, 2, 0);
+    add("coalesce+align4", true, 4, 0);
+    add("coalesce+align8+splitbits2", true, 8, 2);
+    add("minima", false, 0, 0, true);
+    add("minima+coalesce+align4", true, 4, 0, true);
+    add("minima+coalesce+align8+splitbits2", true, 8, 2, true);
 
     for (const auto& cfg : configs) {
         auto idx = ms_io::build_ms_index_spill_from_tsv<false>(path, cfg.opts);
@@ -963,23 +958,23 @@ static std::pair<int, std::string> compare_find_first_mismatch(
 /** Build an index with given options. */
 using IndexBuilder = std::function<std::optional<MSIndexSpillLCP<false>>()>;
 
-static const char* PATTERN_COAL_SPLIT = "AGAAAAGCCCTCTGATTTTTCACCAGGAGGGTAGTGGTAGTGGTATGGCCAAGAGTGGGGAGGTTGGATGCCCAGGCTCTATACATTCTGTGTGTGTGTG";
+static const char* PATTERN_COAL = "AGAAAAGCCCTCTGATTTTTCACCAGGAGGGTAGTGGTAGTGGTATGGCCAAGAGTGGGGAGGTTGGATGCCCAGGCTCTATACATTCTGTGTGTGTGTG";
 static const char* PATTERN_MULTISPILL2 = "CACAAAGTACATTCTCAAGAGTGGGGAGAATTACAAAGAATCTTCTTAAGGGTGGGGGAGATTACAAAGTACATTGATCAGTTAGGGTGGGGCAGGAACA";
 
-/** Assert coal_split index matches naive on a specific pattern. */
-bool test_coal_split_vs_naive_discrepant(const std::string& data_dir) {
-    std::cout << "Testing coal_split vs naive (discrepant pattern)" << std::endl;
+/** Assert coal index matches naive on a specific pattern. */
+bool test_coal_vs_naive_discrepant(const std::string& data_dir) {
+    std::cout << "Testing coal vs naive (discrepant pattern)" << std::endl;
     std::string path = data_dir + "/minishred1_20_002_lcp.tsv";
     auto idx_base = ms_io::build_ms_index_spill_from_tsv<false>(path, ms_io::BuildOptions{});
     if (!idx_base) { std::cout << "  DID NOT RUN" << std::endl; return false; }
     std::string T = reconstruct_text(*idx_base);
-    ms_io::BuildOptions o; o.coalesce = true; o.split_threshold = 1;
+    ms_io::BuildOptions o; o.coalesce = true;
     auto idx = ms_io::build_ms_index_spill_from_tsv<false>(path, o);
     if (!idx) { std::cout << "  DID NOT RUN" << std::endl; return false; }
-    std::string P(PATTERN_COAL_SPLIT);
+    std::string P(PATTERN_COAL);
     auto ms_idx = ms_query(*idx, P);
     auto ms_naive = naive_matching_statistics(T, P);
-    assert(ms_idx == ms_naive && "coal_split must match naive");
+    assert(ms_idx == ms_naive && "coal must match naive");
     std::cout << "  PASSED" << std::endl;
     return true;
 }
@@ -991,7 +986,7 @@ bool test_multispill_vs_naive_discrepant(const std::string& data_dir, uchar spil
     auto idx_base = ms_io::build_ms_index_spill_from_tsv<false>(path, ms_io::BuildOptions{});
     if (!idx_base) { std::cout << "  DID NOT RUN" << std::endl; return false; }
     std::string T = reconstruct_text(*idx_base);
-    ms_io::BuildOptions o; o.coalesce = true; o.split_threshold = 1; o.spill_split_bits = spill_bits;
+    ms_io::BuildOptions o; o.coalesce = true; o.spill_split_bits = spill_bits;
     auto idx = ms_io::build_ms_index_spill_from_tsv<false>(path, o);
     if (!idx) { std::cout << "  DID NOT RUN" << std::endl; return false; }
     std::string P(PATTERN_MULTISPILL2);
@@ -1023,11 +1018,9 @@ bool test_index_types_consistency(const std::string& data_dir) {
     std::mt19937 rng(456);
 
     auto build_base = [&]() { return ms_io::build_ms_index_spill_from_tsv<false>(path, ms_io::BuildOptions{}); };
-    auto build_split = [&]() { ms_io::BuildOptions o; o.split_threshold = 1; return ms_io::build_ms_index_spill_from_tsv<false>(path, o); };
     auto build_coal = [&]() { ms_io::BuildOptions o; o.coalesce = true; return ms_io::build_ms_index_spill_from_tsv<false>(path, o); };
-    auto build_coal_split = [&]() { ms_io::BuildOptions o; o.coalesce = true; o.split_threshold = 1; return ms_io::build_ms_index_spill_from_tsv<false>(path, o); };
     auto build_multispill = [&](uchar bits) {
-        ms_io::BuildOptions o; o.coalesce = true; o.split_threshold = 1; o.spill_split_bits = bits;
+        ms_io::BuildOptions o; o.coalesce = true; o.spill_split_bits = bits;
         return ms_io::build_ms_index_spill_from_tsv<false>(path, o);
     };
 
@@ -1049,9 +1042,7 @@ bool test_index_types_consistency(const std::string& data_dir) {
         auto ms_starts = [&](const std::string& P) { return ms_query(*idx_starts, P); };
         compare_index_pair(ms_len, ms_starts, *idx_base, T, num_patterns, reposition_rate, pattern_len, rng);
     }
-    run_comparison("split", build_split());
     run_comparison("coal", build_coal());
-    run_comparison("coal_split", build_coal_split());
     for (uchar bits = 2; bits <= 10; ++bits)
         run_comparison("multispill", build_multispill(bits));
 
@@ -1120,7 +1111,7 @@ static bool same_answers(MSIndexSpillLCP<false>& unsplit, MSIndexSpillLCP<false>
  * texts and minishred, for several LF splits and build options, compare split
  * indexes, built from full LCPs as build does and from minima-only retained
  * pairs as build-rlbwt does with a minima file, with unsplit references.
- * Without LCP splitting, the split index's rows must be Orbit's LF intervals.
+ * The split index's rows must be Orbit's LF intervals.
  * Split parameters that do not split are refused.
  */
 bool test_lf_split(const std::string& data_dir) {
@@ -1145,10 +1136,10 @@ bool test_lf_split(const std::string& data_dir) {
     configs[1].name = "minima+pk0.9+coalesce+splitbits6";
     configs[1].opts.minima_only = true; configs[1].opts.percentile_k = 0.9;
     configs[1].opts.coalesce = true; configs[1].opts.spill_split_bits = 6;
-    configs[2].name = "coalesce+split1+align4";
-    configs[2].opts.coalesce = true; configs[2].opts.split_threshold = 1; configs[2].opts.spill_align = 4;
-    configs[3].name = "minima+split1+align8+splitbits2";
-    configs[3].opts.minima_only = true; configs[3].opts.split_threshold = 1;
+    configs[2].name = "coalesce+align4";
+    configs[2].opts.coalesce = true; configs[2].opts.spill_align = 4;
+    configs[3].name = "minima+align8+splitbits2";
+    configs[3].opts.minima_only = true;
     configs[3].opts.spill_align = 8; configs[3].opts.spill_split_bits = 2;
     const std::vector<std::pair<const char*, orbit::split_params>> splits = {
         {"default", orbit::split_params(orbit::DEFAULT_LENGTH_CAPPING, orbit::DEFAULT_BALANCING)},
@@ -1173,8 +1164,7 @@ bool test_lf_split(const std::string& data_dir) {
                 ms_io::BuildOptions o = cfg.opts;
                 o.lf_split = sp;
                 auto split = ms_io::build_ms_index_spill(in.heads, in.lens, in.lcps, o);
-                if (o.split_threshold == SPLIT_THRESHOLD_NEVER &&
-                    split.move_runs() != lf_split_row_lengths(in.heads, in.lens, sp).size()) {
+                if (split.move_runs() != lf_split_row_lengths(in.heads, in.lens, sp).size()) {
                     std::cout << "  FAILED: rows are not Orbit's LF intervals for " << in.name << ", " << cfg.name
                               << ", " << sname << std::endl;
                     assert(false && "split rows must be Orbit's LF intervals");
@@ -1222,14 +1212,13 @@ static std::string index_bytes(MSIndexSpillLCP<SP>& idx) {
 }
 
 /**
- * The index the step-by-step build makes (apply_lcp_splitting,
- * retained_lcp_pairs, apply_lf_splitting, build_spill_data_from_pairs and
- * the MSIndexSpillLCP constructor), which ms_build must reproduce.
+ * The index the step-by-step build makes (retained_lcp_pairs,
+ * apply_lf_splitting, build_spill_data_from_pairs and the MSIndexSpillLCP
+ * constructor), which ms_build must reproduce.
  */
 template <bool SP>
 static MSIndexSpillLCP<SP> stepwise_index(std::vector<uchar> heads, std::vector<ulint> lens,
                                           std::vector<std::vector<ulint>> lcps, const ms_io::BuildOptions& o) {
-    apply_lcp_splitting(heads, lens, lcps, o.split_threshold, o.minima_only);
     auto pairs = retained_lcp_pairs(lcps, o.minima_only);
     apply_lf_splitting(heads, lens, pairs, o.lf_split, o.minima_only);
     auto [run_data, spill, max_top, max_sub, skinny, jumbo] = build_spill_data_from_pairs(
@@ -1264,17 +1253,15 @@ bool test_streaming_build(const std::string& data_dir) {
     for (bool minima : {false, true})
         for (bool coalesce : {false, true})
             for (double pk : {0.5, 0.9, 0.98, 1.0})
-                for (auto [align, bits] : {std::pair<ulint, uchar>{0, 0}, {0, 6}, {4, 2}, {8, 0}})
-                    for (ulint split : {SPLIT_THRESHOLD_NEVER, ulint{1}}) {
-                        ms_io::BuildOptions o;
-                        o.minima_only = minima;
-                        o.coalesce = coalesce;
-                        o.percentile_k = pk;
-                        o.spill_align = align;
-                        o.spill_split_bits = bits;
-                        o.split_threshold = split;
-                        configs.push_back(o);
-                    }
+                for (auto [align, bits] : {std::pair<ulint, uchar>{0, 0}, {0, 6}, {4, 2}, {8, 0}}) {
+                    ms_io::BuildOptions o;
+                    o.minima_only = minima;
+                    o.coalesce = coalesce;
+                    o.percentile_k = pk;
+                    o.spill_align = align;
+                    o.spill_split_bits = bits;
+                    configs.push_back(o);
+                }
     const std::vector<orbit::split_params> splits = {
         orbit::split_params(orbit::DEFAULT_LENGTH_CAPPING, orbit::DEFAULT_BALANCING),
         orbit::split_params(std::nullopt, 2),
@@ -1371,7 +1358,7 @@ bool run_all_tests(const std::string& data_dir) {
     std::cout << std::endl;
     if (!test_index_types_consistency(data_dir)) all_ran = false;
     std::cout << std::endl;
-    if (!test_coal_split_vs_naive_discrepant(data_dir)) all_ran = false;
+    if (!test_coal_vs_naive_discrepant(data_dir)) all_ran = false;
     std::cout << std::endl;
     if (!test_multispill_vs_naive_discrepant(data_dir, 2)) all_ran = false;
     std::cout << std::endl;
@@ -1403,13 +1390,13 @@ static std::optional<MSIndexSpillLCP<false>> build_index_by_type(const std::stri
     if (index_type == "base") {
         return ms_io::build_ms_index_spill_from_tsv<false>(path, ms_io::BuildOptions{});
     }
-    if (index_type == "coal_split") {
-        ms_io::BuildOptions o; o.coalesce = true; o.split_threshold = 1;
+    if (index_type == "coal") {
+        ms_io::BuildOptions o; o.coalesce = true;
         return ms_io::build_ms_index_spill_from_tsv<false>(path, o);
     }
     if (index_type.compare(0, 10, "multispill") == 0 && index_type.size() >= 11) {
         uchar bits = static_cast<uchar>(std::stoul(index_type.substr(10)));
-        ms_io::BuildOptions o; o.coalesce = true; o.split_threshold = 1; o.spill_split_bits = bits;
+        ms_io::BuildOptions o; o.coalesce = true; o.spill_split_bits = bits;
         return ms_io::build_ms_index_spill_from_tsv<false>(path, o);
     }
     return std::nullopt;
@@ -1666,12 +1653,12 @@ bool run_discover_failing_patterns(const std::string& data_dir) {
     std::mt19937 rng(456);
 
     auto build_base = [&]() { return ms_io::build_ms_index_spill_from_tsv<false>(path, ms_io::BuildOptions{}); };
-    auto build_coal_split = [&]() {
-        ms_io::BuildOptions o; o.coalesce = true; o.split_threshold = 1;
+    auto build_coal = [&]() {
+        ms_io::BuildOptions o; o.coalesce = true;
         return ms_io::build_ms_index_spill_from_tsv<false>(path, o);
     };
     auto build_multispill = [&](uchar bits) {
-        ms_io::BuildOptions o; o.coalesce = true; o.split_threshold = 1; o.spill_split_bits = bits;
+        ms_io::BuildOptions o; o.coalesce = true; o.spill_split_bits = bits;
         return ms_io::build_ms_index_spill_from_tsv<false>(path, o);
     };
 
@@ -1690,7 +1677,7 @@ bool run_discover_failing_patterns(const std::string& data_dir) {
         }
     };
 
-    discover("coal_split", build_coal_split(), build_coal_split);
+    discover("coal", build_coal(), build_coal);
     for (uchar bits = 2; bits <= 10; ++bits) {
         char buf[32];
         snprintf(buf, sizeof(buf), "multispill%u", static_cast<unsigned>(bits));
