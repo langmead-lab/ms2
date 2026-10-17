@@ -40,7 +40,7 @@ debug: ms2
 tms_chain_bench: tms_chain_bench.cpp index_format.cpp $(MS_HDRS)
 	$(CXX) $(CXXFLAGS) -o tms_chain_bench tms_chain_bench.cpp index_format.cpp
 
-.PHONY: test test-threads test-reader test-rewrap test-ftab all clean debug bench
+.PHONY: test test-threads test-reader test-ftab all clean debug bench
 test: ms2
 	./ms2 test ../data
 
@@ -59,12 +59,6 @@ test-threads: ms2
 # Stored ftabs: ftab-build, ftab-verify and byte identity with --ftab-file
 test-ftab: ms2
 	./test_ftab.sh ./ms2 ../data
-
-# index-rewrap against new builds: OLD is an ms binary that writes the
-# earlier formats (MSIX v4, TMSX v8), as built from commit f82f172
-test-rewrap: ms2
-	@test -n "$(OLD)" || { echo "usage: make test-rewrap OLD=path/to/old/ms"; exit 1; }
-	./test_rewrap.sh $(OLD) ./ms2 ../data
 
 all: ms2
 

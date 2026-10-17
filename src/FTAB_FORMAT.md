@@ -65,7 +65,7 @@ Each is the index's section-table entry, in the ORBITIDX encoding, for one secti
 
 A tms table with a toehold links both forms of phi, since its phi points read the same in either and a query loads one or the other.
 
-The link matches an index when the index header's tool, layout, n, BWT runs and format version equal the copies, and each linked section is present with the same kind, rows, domain, payload bytes, row bits, column codes and widths, and CRC-32; and the index holds no other section of the list above. The rest of the index header, notably its info text, does not enter the link, so an index rewrapped from the same content (`ms2 index-rewrap`) still matches. `ftab-verify` and `--ftab-file` name the first field that differs.
+The link matches an index when the index header's tool, layout, n, BWT runs and format version equal the copies, and each linked section is present with the same kind, rows, domain, payload bytes, row bits, column codes and widths, and CRC-32; and the index holds no other section of the list above. The rest of the index header, notably its info text, does not enter the link, so an index with the same content and other info text still matches. `ftab-verify` and `--ftab-file` name the first field that differs.
 
 ## Info text
 

@@ -254,10 +254,6 @@ static void usage(const char* prog) {
               << "              options for that one alone.\n"
               << "  index-verify INDEX_PATH\n"
               << "              Check every section's CRC-32 and that the file is whole.\n"
-              << "  index-rewrap LEGACY_PATH INDEX_PATH\n"
-              << "              Rewrite an index of the earlier formats (MSIX v4 from build or\n"
-              << "              build-rlbwt, TMSX v8 from tms-build) in the current format,\n"
-              << "              copying its structures' bytes without loading them.\n"
               << "  tms-inspect INDEX_PATH [--phi-lengths]\n"
               << "              Print the structures' sizes and column widths.  --phi-lengths\n"
               << "              loads only LF and phi's lengths-based form.\n"
@@ -1590,19 +1586,6 @@ int main(int argc, char** argv) {
         const std::string bad = orbit_idx::verify_file(argv[0]);
         if (!bad.empty()) { std::cerr << argv[0] << ": " << bad << "\n"; return 1; }
         std::cout << argv[0] << ": every section's CRC-32 matches\n";
-        return 0;
-    }
-
-    if (cmd == "index-rewrap") {
-        if (argc < 2) { std::cerr << "index-rewrap requires LEGACY_PATH and INDEX_PATH\n"; return 1; }
-        std::string info = "rewrapped_from=" + std::string(argv[0]) + "\n" + build_info();
-        info.replace(info.find("built_by="), 9, "rewrapped_by=");
-        info.replace(info.find("built_at="), 9, "rewrapped_at=");
-        const auto t0 = std::chrono::steady_clock::now();
-        const std::string err = orbit_idx::rewrap_legacy(argv[0], argv[1], info);
-        if (!err.empty()) { std::cerr << "index-rewrap: " << err << "\n"; return 1; }
-        std::cout << "Rewrapped " << argv[0] << " as " << argv[1] << " (s="
-                  << std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() << ")\n";
         return 0;
     }
 

@@ -9,7 +9,7 @@
  * table's walk read.  A table is used with an index only if the link
  * matches the index's header, which needs the header alone.  The rest of the
  * index header (its info text, its other sections) does not enter the link,
- * so that an index rewrapped from the same content still matches.
+ * so that an index with the same content and other info text still matches.
  */
 
 #ifndef _FTAB_FILE_HPP

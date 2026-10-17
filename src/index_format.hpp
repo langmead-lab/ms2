@@ -585,13 +585,6 @@ void describe_header(const Header& h, std::ostream& os);
  */
 std::string verify_file(const std::string& path);
 
-/**
- * Rewrite a legacy index (MSIX v4 or TMSX v8) at from as an ORBITIDX file at
- * to, copying each structure's bytes without loading it.  info is appended to
- * the provenance.  Returns an empty string on success, else the error.
- */
-std::string rewrap_legacy(const std::string& from, const std::string& to, const std::string& info);
-
 }  // namespace orbit_idx
 
 #endif

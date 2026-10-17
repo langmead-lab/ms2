@@ -46,7 +46,7 @@ The file ends where the last section ends; `ms2 index-verify` checks this along 
 | 40 | u32 | CRC-32 (IEEE) of the payload |
 | 48 | (u8, u8)[12] | (column code, width) per column, in row order |
 
-Column codes: 1 len, 2 start, 3 ptr, 4 off, 5 chr, 16 psi_int, 17 psi_off, 18 phi_int, 19 phi_off, 20 plcp, 21 plcpb, 32 lcp_top, 33 lcp_min_sub, 34 lcp_spill. A width of 0 means the column takes no bits and reads as 0, as with the LF columns a tms layout omits. Column 0 says whether a move table stores lengths (`len`) or absolute starts (`start`). In a tms LF, `phi_int` holds, at each row that starts a BWT run, the φ interval that starts at that row's text position (0 at other rows), and `phi_off` has width 0, since the φ points queries read all have offset 0. Indexes rewrapped from TMSX v8 keep the nonzero `phi_off` width their builds gave it, which loads and answers the same.
+Column codes: 1 len, 2 start, 3 ptr, 4 off, 5 chr, 16 psi_int, 17 psi_off, 18 phi_int, 19 phi_off, 20 plcp, 21 plcpb, 32 lcp_top, 33 lcp_min_sub, 34 lcp_spill. A width of 0 means the column takes no bits and reads as 0, as with the LF columns a tms layout omits. Column 0 says whether a move table stores lengths (`len`) or absolute starts (`start`). In a tms LF, `phi_int` holds, at each row that starts a BWT run, the φ interval that starts at that row's text position (0 at other rows), and `phi_off` has width 0, since the φ points queries read all have offset 0.
 
 Payloads:
 
@@ -85,10 +85,4 @@ An ftab (FTAB_FORMAT.md), a table of query states by k-mer that `batch` and `tms
 
 ## Info text
 
-The info text records provenance as `key=value` lines: `built_by` (the command line) and `built_at` (UTC). A rewrapped index records `rewrapped_from`, `rewrapped_by` and `rewrapped_at` instead.
-
-## Rewrapping earlier indexes
-
-`ms2 index-rewrap LEGACY NEW` rewrites an MSIX v4 or TMSX v8 index in this format without loading it. It parses each structure's Orbit preamble to find where the structure ends, then copies its bytes into a section. It also counts the BWT runs from LF's character column while copying. Memory use is constant. The output equals a fresh build of the same input with the same options, apart from the info text (see `test_rewrap.sh`).
-
-Each section's bytes are read twice, once to size and checksum it so that the header can go first, and once to copy it.
+The info text records provenance as `key=value` lines: `built_by` (the command line) and `built_at` (UTC).

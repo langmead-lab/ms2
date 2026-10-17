@@ -1851,7 +1851,7 @@ bool test_ftab(const std::string& data_dir) {
 
 /**
  * An ftab's link to its index: it matches the index it was built from, and
- * one whose header differs only in its info text (as a rewrap's does), and
+ * one whose header differs only in its info text, and
  * is refused, naming the field, by an index of the same text with other
  * split settings or layout and by an index of another text.
  */
@@ -1884,10 +1884,10 @@ bool test_ftab_link(const std::string& data_dir) {
         ftab::FileHeader h;
         ftab_round_trip(ftab::build_tms(x, 4, 2).tab, hx, h);
         // Its own index, and the same with other info text.
-        orbit_idx::Header rewrapped = hx;
-        rewrapped.info = "rewrapped_from=elsewhere\n";
-        if (!ftab::link_mismatch(h, rewrapped).empty()) {
-            std::cout << "  FAILED: a rewrapped header must match" << std::endl;
+        orbit_idx::Header relabeled = hx;
+        relabeled.info = "built_by=elsewhere\n";
+        if (!ftab::link_mismatch(h, relabeled).empty()) {
+            std::cout << "  FAILED: a header with other info text must match" << std::endl;
             assert(false);
             return false;
         }
