@@ -1,6 +1,6 @@
 # ORBITIDX: the Orbit-ms and Orbit-tms index format
 
-Both `ms2 build`/`build-rlbwt` (Orbit-ms) and `ms2 tms-build` (Orbit-tms) write this format. The first 4096 bytes of a file describe everything it holds: each move table, its columns in row order, and each column's bit width. The format describes what is stored. Which parts a query loads is the software's choice, so it can change without changing the format. Given that choice, the header alone says exactly what a query will hold in RAM; `ms2 index-plan INDEX` prints it. Code: `index_format.hpp` and `index_format.cpp`.
+Both `ms2 build-rlbwt` (Orbit-ms) and `ms2 tms-build` (Orbit-tms) write this format. The first 4096 bytes of a file describe everything it holds: each move table, its columns in row order, and each column's bit width. The format describes what is stored. Which parts a query loads is the software's choice, so it can change without changing the format. Given that choice, the header alone says exactly what a query will hold in RAM; `ms2 index-plan INDEX` prints it. Code: `index_format.hpp` and `index_format.cpp`.
 
 All integers are little-endian. The endian check refuses a file written on a big-endian host.
 
