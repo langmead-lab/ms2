@@ -60,6 +60,15 @@ test-threads: ms2
 test-ftab: ms2
 	./test_ftab.sh ./ms2 ../data
 
+# tms-batch --report smem-all against ropebwt3 mem on a small FMD: TERALCP
+# is a TeraLCP that writes -ophi, and ROPEBWT3 the ropebwt3 to compare with
+test-rope: ms2 tools/fmd2rlbwt/fmd2rlbwt
+	@test -n "$(TERALCP)" || { echo "usage: make test-rope TERALCP=path/to/TeraLCP [ROPEBWT3=ropebwt3]"; exit 1; }
+	./test_rope.sh ./ms2 tools/fmd2rlbwt/fmd2rlbwt $(TERALCP) $(or $(ROPEBWT3),ropebwt3)
+
+tools/fmd2rlbwt/fmd2rlbwt:
+	$(MAKE) -C tools/fmd2rlbwt
+
 all: ms2
 
 clean:
