@@ -55,12 +55,20 @@ enum class TmsCount {
     ADAPTIVE,  // walk up to a budget of steps, then backward search if the walk has not ended
 };
 
-/** The counting method and the adaptive method's thresholds. */
+/**
+ * The counting method and the adaptive method's thresholds.  The defaults,
+ * ADAPTIVE with a budget of 8 + L / 4, keep counting close to the walk's
+ * cost where SMEMs are long and rare and close to backward search's where
+ * they are short and frequent.
+ */
 struct TmsCountOptions {
-    TmsCount method = TmsCount::WALK;
+    TmsCount method = TmsCount::ADAPTIVE;
     // ADAPTIVE: walk steps (up and down together) before switching to
-    // backward search.
-    ulint budget = 64;
+    // backward search, budget + budget_per_len * L for an SMEM of length L.
+    // Backward search takes L extensions, so a budget in proportion to L
+    // bounds the cost of walking first by the cost of searching.
+    ulint budget = 8;
+    double budget_per_len = 0.25;
     // ADAPTIVE: SMEMs at most this long are backward searched without
     // walking first.
     ulint short_len = 0;

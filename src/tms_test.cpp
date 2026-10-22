@@ -1422,12 +1422,19 @@ size_t check_counting(TmsIndex& idx, const std::vector<std::string>& pats, const
     o.method = TmsCount::BACKWARD;
     opts.push_back(o);
     o.method = TmsCount::ADAPTIVE;
+    o.budget_per_len = 0;
     for (ulint budget : {0, 1, 3, 20})
         for (ulint short_len : {0, 4}) {
             o.budget = budget;
             o.short_len = short_len;
             opts.push_back(o);
         }
+    o.short_len = 0;
+    for (double per_len : {0.25, 1.0}) {
+        o.budget = 2;
+        o.budget_per_len = per_len;
+        opts.push_back(o);
+    }
     const std::vector<std::vector<ulint>> none(pats.size());
     size_t compared = 0;
     for (ulint cap : {ulint(0), ulint(1), ulint(2), ulint(5), TMS_ALL_POSITIONS})
