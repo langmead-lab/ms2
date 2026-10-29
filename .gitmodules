@@ -1,7 +1,7 @@
 [submodule "orbit"]
 	path = orbit
 	url = https://github.com/BenLangmead/runperm.git
-	branch = v3/lib-data-columns
+	branch = v3/lib-repack-data
 [submodule "teratools"]
 	path = teratools
 	url = https://github.com/BenLangmead/TeraTools.git

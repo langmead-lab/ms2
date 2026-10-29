@@ -9,6 +9,7 @@
 #include "tms_query.hpp"
 #include "tms_smem.hpp"
 #include "ms_rlbwt.hpp"
+#include "ms_build.hpp"
 #include "ms_io.hpp"
 #include "orient.hpp"
 #include "ftab_build.hpp"
@@ -437,7 +438,7 @@ bool test_tms_batch(const std::string& data_dir) {
     std::cout << "Testing tms_query_batch in every mode against tms_query" << std::endl;
     std::mt19937 rng(41);
     const auto inputs = batch_inputs(data_dir, rng);
-    const TmsMode modes[] = {TmsMode::PSI, TmsMode::PHI, TmsMode::PHISKIP, TmsMode::DUAL};
+    const TmsMode modes[] = {TmsMode::PSI, TmsMode::PHI_WALK, TmsMode::PHISKIP, TmsMode::DUAL_WALK};
     size_t checked = 0, positions = 0, access_rows = 0;
     for (const auto& in : inputs) {
         const std::string& T = in.text;
@@ -513,7 +514,7 @@ bool test_tms_batch(const std::string& data_dir) {
 bool test_orient_both_strands() {
     std::cout << "Testing --orient rc and qual on texts holding both strands" << std::endl;
     std::mt19937 rng(73);
-    const TmsMode modes[] = {TmsMode::PSI, TmsMode::PHI, TmsMode::PHISKIP, TmsMode::DUAL};
+    const TmsMode modes[] = {TmsMode::PSI, TmsMode::PHI_WALK, TmsMode::PHISKIP, TmsMode::DUAL_WALK};
     size_t checked = 0, flipped = 0;
     for (int k = 0; k < 30; ++k) {
         std::string text;
@@ -772,7 +773,7 @@ bool test_smem_report(const std::string& data_dir) {
     std::cout << "Testing SMEM reports against every occurrence" << std::endl;
     std::mt19937 rng(43);
     const auto inputs = batch_inputs(data_dir, rng);
-    const TmsMode modes[] = {TmsMode::PSI, TmsMode::PHI, TmsMode::PHISKIP, TmsMode::DUAL};
+    const TmsMode modes[] = {TmsMode::PSI, TmsMode::PHI_WALK, TmsMode::PHISKIP, TmsMode::DUAL_WALK};
     size_t smems = 0, positions = 0, capped = 0;
     // SMEMs with no rows above the toehold's, none below, and some on both sides.
     size_t none_up = 0, none_down = 0, both = 0;
@@ -972,7 +973,7 @@ bool test_tms_oracle(const std::string& data_dir) {
     std::cout << "Testing the oracle mode against the recording modes" << std::endl;
     std::mt19937 rng(53);
     const auto inputs = batch_inputs(data_dir, rng);
-    const TmsMode modes[] = {TmsMode::PSI, TmsMode::PHI, TmsMode::PHISKIP, TmsMode::DUAL};
+    const TmsMode modes[] = {TmsMode::PSI, TmsMode::PHI_WALK, TmsMode::PHISKIP, TmsMode::DUAL_WALK};
     size_t replays = 0, decisions = 0;
     for (const auto& in : inputs) {
         auto pats = fuzz_patterns(in.text, rng, in.text.size() > 5000 ? 80 : 150);
@@ -1122,7 +1123,8 @@ bool test_layouts(const std::string& data_dir) {
             TmsIndex phi_noinv_built(in.heads, in.lens, phi_noinv_opts, &in.tops);
             TmsIndex psi = round_trip(psi_built), phi = round_trip(phi_built), phi_noinv = round_trip(phi_noinv_built);
             // Parts held, and LF columns of width 0 exactly where a part is
-            // missing, and PHI_OFF, whose phi points all have offset 0.
+            // missing, PHI_OFF, whose phi points all have offset 0, and the
+            // LCP summary columns, built without --lcp-summary.
             auto parts_are = [](const TmsIndex& x, bool a, bool b, bool c) {
                 return x.has_psi() == a && x.has_phi() == b && x.has_phi_inv() == c;
             };
@@ -1134,22 +1136,22 @@ bool test_layouts(const std::string& data_dir) {
             constexpr size_t PSI_INT = TmsIndex::LF::template data_column<TmsLFCols::PSI_INT>();
             for (size_t c = 0; c < fw.size(); ++c) {
                 const bool psi_col = c == PSI_INT || c == PSI_INT + 1, phi_col = c == PSI_INT + 2 || c == PSI_INT + 3;
-                const bool phi_off = c == PSI_INT + 3;
-                assert((fw[c] > 0) == !phi_off);
+                const bool phi_off = c == PSI_INT + 3, summary_col = c == PSI_INT + 4 || c == PSI_INT + 5;
+                assert((fw[c] > 0) == !(phi_off || summary_col));
                 // The phi layout's LF has other rows, without the union
                 // with the images, so only its zero widths are compared.
-                assert(sw[c] == (phi_col ? 0 : fw[c]) && (hw[c] == 0) == (psi_col || phi_off));
+                assert(sw[c] == (phi_col ? 0 : fw[c]) && (hw[c] == 0) == (psi_col || phi_off || summary_col));
             }
             assert(psi.packed_access().fits() && phi.packed_access().fits());
 
             // Full indexes loaded with only what psi MS, and what phi queries, read.
             const TmsParts psi_need = tms_query_parts(TmsMode::PSI, false, TmsReport::MS);
-            const TmsParts phi_need = tms_query_parts(TmsMode::PHI, true, TmsReport::SMEM_ALL);
+            const TmsParts phi_need = tms_query_parts(TmsMode::PHI_WALK, true, TmsReport::SMEM_ALL);
             TmsIndex full_psi = round_trip(full, &psi_need), full_phi = round_trip(full, &phi_need);
             assert(parts_are(full_psi, true, false, false) && parts_are(full_phi, false, true, true));
             // Matching statistics alone load phi's lengths-based form, and
             // positions and SMEMs its starts-based form; a whole load has both.
-            const TmsParts phi_ms_need = tms_query_parts(TmsMode::PHI, false, TmsReport::MS);
+            const TmsParts phi_ms_need = tms_query_parts(TmsMode::PHI_WALK, false, TmsReport::MS);
             assert(!phi_ms_need.phi_starts && phi_need.phi_starts);
             TmsIndex full_phi_len = round_trip(full, &phi_ms_need), phi_len = round_trip(phi_built, &phi_ms_need);
             for (const TmsIndex* x : {&full_phi_len, &phi_len})
@@ -1167,7 +1169,7 @@ bool test_layouts(const std::string& data_dir) {
                     }
                     for (bool positions : {false, true})
                         for (TmsReport report : {TmsReport::MS, TmsReport::SMEM_ONE, TmsReport::SMEM_ALL}) {
-                            const auto want_phi = query_output(full, pats, k, TmsMode::PHI, positions, report, packed);
+                            const auto want_phi = query_output(full, pats, k, TmsMode::PHI_WALK, positions, report, packed);
                             std::vector<TmsIndex*> xs = {&phi, &full_phi, &phi_built};
                             if (report != TmsReport::SMEM_ALL) xs.push_back(&phi_noinv);
                             if (!positions && report == TmsReport::MS) {
@@ -1175,7 +1177,7 @@ bool test_layouts(const std::string& data_dir) {
                                 xs.push_back(&phi_len);
                             }
                             for (TmsIndex* x : xs) {
-                                if (query_output(*x, pats, k, TmsMode::PHI, positions, report, packed) != want_phi) {
+                                if (query_output(*x, pats, k, TmsMode::PHI_WALK, positions, report, packed) != want_phi) {
                                     std::cout << "  FAILED: phi layout output differs, k " << k << std::endl;
                                     assert(false && "a phi index must answer as the full index does");
                                     return false;
@@ -1198,14 +1200,14 @@ bool test_layouts(const std::string& data_dir) {
             assert(throws<std::runtime_error>([&] { round_trip(phi_noinv_built, &phi_need); }, "needs phi_inv"));
             std::vector<std::vector<ulint>> len, pos;
             assert(throws<std::invalid_argument>([&] { tms_query_batch(phi, pats, 8, len, TmsMode::PSI); }, "psi"));
-            assert(throws<std::invalid_argument>([&] { tms_query_batch(phi, pats, 8, len, TmsMode::DUAL); }, "psi"));
+            assert(throws<std::invalid_argument>([&] { tms_query_batch(phi, pats, 8, len, TmsMode::DUAL_WALK); }, "psi"));
             assert(throws<std::invalid_argument>([&] { tms_query(phi, "ACGT"); }, "psi"));
-            assert(throws<std::invalid_argument>([&] { tms_query_batch(psi, pats, 8, len, TmsMode::PHI); }, "phi"));
+            assert(throws<std::invalid_argument>([&] { tms_query_batch(psi, pats, 8, len, TmsMode::PHI_WALK); }, "phi"));
             assert(throws<std::invalid_argument>([&] { tms_query_batch(psi, pats, 8, len, TmsMode::PSI, &pos); }, "phi"));
-            assert(throws<std::invalid_argument>([&] { tms_query_batch(phi_len, pats, 8, len, TmsMode::PHI, &pos); },
+            assert(throws<std::invalid_argument>([&] { tms_query_batch(phi_len, pats, 8, len, TmsMode::PHI_WALK, &pos); },
                                                  "starts-based"));
             assert(throws<std::logic_error>([&] { round_trip(phi_len); }, "only some of its parts"));
-            tms_query_batch(phi_noinv, pats, 8, len, TmsMode::PHI, &pos);
+            tms_query_batch(phi_noinv, pats, 8, len, TmsMode::PHI_WALK, &pos);
             std::vector<TmsSmemHits> hits;
             assert(throws<std::invalid_argument>(
                 [&] { tms_report_smems_batch(phi_noinv, len, pos, 0, TmsReport::SMEM_ALL, 8, hits); }, "phi_inv"));
@@ -1238,7 +1240,7 @@ bool test_lf_rows(const std::string& data_dir) {
     std::cout << "Testing LF rows from LF split several ways" << std::endl;
     std::mt19937 rng(53);
     const auto inputs = batch_inputs(data_dir, rng);
-    const TmsMode modes[] = {TmsMode::PSI, TmsMode::PHI, TmsMode::PHISKIP, TmsMode::DUAL};
+    const TmsMode modes[] = {TmsMode::PSI, TmsMode::PHI_WALK, TmsMode::PHISKIP, TmsMode::DUAL_WALK};
     size_t compared = 0, access_rows = 0, rows = 0, split_rows = 0;
     for (const auto& in : inputs) {
         const bool big = in.text.size() > 5000;
@@ -1618,6 +1620,7 @@ bool test_index_format() {
     assert(h.tool == Tool::TMS && h.layout == Layout::FULL && h.n == idx.domain() && h.bwt_runs == idx.bwt_runs());
     assert(h.sections.size() == 5 && h.info == "built_by=test\n");
     const SectionEntry* lf = h.find(Section::LF);
+    // Without LCP summaries, LF's section leaves out their two columns.
     assert(lf && lf->rows == idx.lf().intervals() && lf->cols.size() == 8);
     assert(lf->cols[4].first == static_cast<uint8_t>(Col::PSI_INT) && lf->cols[4].second == idx.lf().get_widths()[4]);
     for (const auto& e : h.sections) assert(e.offset % SECTION_ALIGN == 0);
@@ -1678,7 +1681,7 @@ bool test_phi_import() {
     std::cout << "Testing phi and phi_inv from imported samples" << std::endl;
     std::mt19937 rng(61);
     size_t compared = 0, multi_checked = 0;
-    const TmsMode modes[] = {TmsMode::PSI, TmsMode::PHI, TmsMode::PHISKIP, TmsMode::DUAL};
+    const TmsMode modes[] = {TmsMode::PSI, TmsMode::PHI_WALK, TmsMode::PHISKIP, TmsMode::DUAL_WALK};
     for (const auto& s : fuzz_texts(rng)) {
         TextBwt t = make_text_bwt(s);
         std::vector<ulint> tops;
@@ -1708,7 +1711,7 @@ bool test_phi_import() {
                 assert(imported.phi_inv_intervals() == walked.phi_inv_intervals());
                 check_phi_against(imported, t.sa, t.isa, t.lcp);
                 for (TmsMode mode : modes) {
-                    if (layout == TmsLayout::PHI && mode != TmsMode::PHI) continue;
+                    if (layout == TmsLayout::PHI && mode != TmsMode::PHI_WALK) continue;
                     for (bool positions : {false, true})
                         for (TmsReport report : {TmsReport::MS, TmsReport::SMEM_ONE, TmsReport::SMEM_ALL}) {
                             const auto want = query_output(walked, pats, 8, mode, positions, report, true);
@@ -1757,7 +1760,7 @@ bool test_phi_import() {
                 TmsIndex idx = round_trip(built);
                 check_phi_against(idx, t.sa, t.isa, t.lcp);
                 for (TmsMode mode : modes) {
-                    if (layout == TmsLayout::PHI && mode != TmsMode::PHI) continue;
+                    if (layout == TmsLayout::PHI && mode != TmsMode::PHI_WALK) continue;
                     std::vector<std::vector<ulint>> len, pos;
                     tms_query_batch(idx, pats, 8, len, mode, &pos, true);
                     // Matching statistics alone walk phi's lengths-based form.
@@ -1857,8 +1860,8 @@ size_t check_tms_with_ftab(TmsIndex& idx, const std::vector<std::string>& pats, 
                            const std::vector<std::vector<ulint>>& want, const std::vector<std::vector<ulint>>* want_pos,
                            const std::string& what) {
     size_t checked = 0;
-    for (TmsMode mode : {TmsMode::PSI, TmsMode::PHI, TmsMode::PHISKIP, TmsMode::DUAL}) {
-        if ((mode != TmsMode::PHI && !idx.has_psi()) || (mode != TmsMode::PSI && !idx.has_phi())) continue;
+    for (TmsMode mode : {TmsMode::PSI, TmsMode::PHI_WALK, TmsMode::PHISKIP, TmsMode::DUAL_WALK}) {
+        if ((mode != TmsMode::PHI_WALK && !idx.has_psi()) || (mode != TmsMode::PSI && !idx.has_phi())) continue;
         for (size_t k : {1, 3, 32})
             for (int access = 0; access < 4; ++access) {
                 const bool packed = access < 2, with_pos = access % 2 == 1;
@@ -1957,7 +1960,7 @@ bool test_ftab(const std::string& data_dir) {
                     bool refused = false;
                     try {
                         TmsIndex& full = idxs[0];
-                        tms_query_batch(full, pats, 8, got, TmsMode::PHI, nullptr, true, &ft);
+                        tms_query_batch(full, pats, 8, got, TmsMode::PHI_WALK, nullptr, true, &ft);
                     } catch (const std::invalid_argument&) {
                         refused = true;
                     }
@@ -1976,7 +1979,7 @@ bool test_ftab(const std::string& data_dir) {
                 bool refused = false;
                 try {
                     std::vector<std::vector<ulint>> got, pos;
-                    tms_query_batch(idx, pats, 8, got, TmsMode::PHI, &pos, true, &b.tab);
+                    tms_query_batch(idx, pats, 8, got, TmsMode::PHI_WALK, &pos, true, &b.tab);
                 } catch (const std::invalid_argument&) {
                     refused = true;
                 }
@@ -2143,6 +2146,177 @@ bool test_ftab_auto(const std::string& data_dir) {
     return true;
 }
 
+/**
+ * Exact LCP summaries of every LF row of an index built with heads, lens
+ * and o: the LCP at the row's head and the least of its other rows' (the
+ * greatest LCP of all for a row of one), from each run's full LCPs.
+ */
+TmsLcpSummary exact_summaries(const std::vector<uchar>& heads, const std::vector<ulint>& lens,
+                              const std::vector<std::vector<ulint>>& lcps, const TmsBuildOptions& o) {
+    const orbit::int_vector rows = TmsIndex::lf_row_lengths(heads, lens, o);
+    std::vector<ulint> all;
+    for (const auto& l : lcps) all.insert(all.end(), l.begin(), l.end());
+    const ulint big = *std::max_element(all.begin(), all.end());
+    const uchar w = std::max<uchar>(1, orbit::bit_width(big));
+    TmsLcpSummary sum{orbit::int_vector(rows.size(), w), orbit::int_vector(rows.size(), w)};
+    for (size_t k = 0, at = 0; k < rows.size(); at += rows[k++]) {
+        sum.top.set(k, all[at]);
+        ulint m = big;
+        for (ulint j = 1; j < rows[k]; ++j) m = std::min(m, all[at + j]);
+        sum.int_min.set(k, m);
+    }
+    return sum;
+}
+
+/**
+ * tms_query_batch in PHI gives the lengths and positions PHI_WALK gives, and
+ * in DUAL (full layout) those DUAL_WALK gives, for several numbers of patterns
+ * in flight, with packed and column access, after a serialize and load, in
+ * the full and phi layouts, and under splittings that cut runs into many LF
+ * rows.  The summaries come from each run's minima-only pairs, as from a
+ * minima file, and also, exactly, from the full LCPs.  Summaries from the
+ * pairs added to a loaded index built without them (set_lcp_summary, as
+ * tms-add-summary does) give the file a build with them writes.  PHI and
+ * DUAL refuse an index without summaries.  Runs on the fuzz texts and, if
+ * its LF is a single cycle, on minishred.
+ */
+bool test_tms_lcp_summary(const std::string& data_dir) {
+    std::cout << "Testing tms_query_batch in phi and dual modes against phi-walk and dual-walk" << std::endl;
+    std::mt19937 rng(43);
+    struct LcpInput { std::vector<uchar> heads; std::vector<ulint> lens; std::vector<std::vector<ulint>> lcps; std::string str; };
+    std::vector<LcpInput> inputs;
+    for (const auto& s : fuzz_texts(rng)) {
+        TextBwt t = make_text_bwt(s);
+        inputs.push_back({t.heads, t.lens, t.lcps_per_run, t.str});
+    }
+    {
+        LcpInput in;
+        if (ms_io::load_rlbwt_lcps(data_dir + "/minishred1_20_002", in.heads, in.lens, in.lcps)) {
+            std::vector<ulint> tops;
+            for (const auto& l : in.lcps) tops.push_back(l[0]);
+            try {
+                TmsIndex probe(in.heads, in.lens, TmsBuildOptions{}, &tops);
+                // The text read back with LF, as batch_inputs reads it.
+                auto pos = probe.first();
+                const ulint n = probe.domain();
+                in.str.assign(n, ' ');
+                for (ulint st = 0; st < n; ++st) {
+                    const uchar c = probe.get_character(pos.interval);
+                    in.str[(2 * n - 2 - st) % n] =
+                        c == orbit::TERMINATOR ? '$' : c == orbit::SEPARATOR ? '%' : static_cast<char>(c);
+                    pos = probe.LF_step(pos);
+                }
+                inputs.push_back(std::move(in));
+            } catch (const std::exception& e) {
+                std::cout << "  minishred skipped: " << e.what() << std::endl;
+            }
+        }
+    }
+    auto variants = split_variants();
+    for (double cap : {1.0, 0.25}) {
+        TmsBuildOptions o;
+        o.lf_split = orbit::split_params(cap, std::nullopt);
+        variants.push_back(o);
+    }
+    size_t checked = 0, checked_dual = 0, cont_rows = 0, added = 0;
+    bool refused = false;
+    for (const auto& in : inputs) {
+        std::vector<ulint> tops;
+        for (const auto& l : in.lcps) tops.push_back(l[0]);
+        const auto pats = fuzz_patterns(in.str, rng, 120);
+        for (TmsBuildOptions o : variants) {
+            for (TmsLayout layout : {TmsLayout::FULL, TmsLayout::PHI}) {
+                o.layout = layout;
+                o.lcp_summary = nullptr;
+                TmsIndex plain(in.heads, in.lens, o, &tops);
+                if (!refused) {
+                    std::vector<std::vector<ulint>> len;
+                    assert(throws<std::invalid_argument>([&] { tms_query_batch(plain, pats, 8, len, TmsMode::PHI); },
+                                                         "LCP summaries"));
+                    assert(throws<std::invalid_argument>([&] { tms_query_batch(plain, pats, 8, len, TmsMode::DUAL); },
+                                                         "LCP summaries"));
+                    refused = true;
+                }
+                std::vector<std::vector<ulint>> want, want_pos, want_dual, want_dual_pos;
+                tms_query_batch(plain, pats, 8, want, TmsMode::PHI_WALK, &want_pos);
+                if (layout == TmsLayout::FULL) tms_query_batch(plain, pats, 8, want_dual, TmsMode::DUAL_WALK, &want_dual_pos);
+                const orbit::int_vector rows = TmsIndex::lf_row_lengths(in.heads, in.lens, o);
+                auto cut = ms_build::row_summaries(in.lens, rows, ms_build::lcp_vectors_source(in.lcps, true));
+                const TmsLcpSummary from_minima{std::move(cut.first), std::move(cut.second)};
+                const TmsLcpSummary exact = exact_summaries(in.heads, in.lens, in.lcps, o);
+                for (const TmsLcpSummary* sum : {&from_minima, &exact}) {
+                    o.lcp_summary = sum;
+                    TmsIndex idx(in.heads, in.lens, o, &tops);
+                    assert(idx.has_lcp_summary() && idx.move_runs() == plain.move_runs());
+                    for (ulint k = 1; k < idx.move_runs(); ++k) cont_rows += idx.get_character(k) == idx.get_character(k - 1);
+                    std::stringstream ss;
+                    idx.serialize(ss);
+                    if (sum == &from_minima) {
+                        // The summaries added to the plain index, loaded from
+                        // a file written without them, with its own rows and
+                        // runs.
+                        std::stringstream ps;
+                        plain.serialize(ps);
+                        TmsIndex aug;
+                        aug.load(ps);
+                        assert(!aug.has_lcp_summary());
+                        const orbit::int_vector run_lens = aug.run_lengths();
+                        assert(run_lens.size() == in.lens.size());
+                        for (size_t i = 0; i < in.lens.size(); ++i) assert(run_lens[i] == in.lens[i]);
+                        auto c = ms_build::row_summaries(run_lens, aug.row_lengths(),
+                                                         ms_build::lcp_vectors_source(in.lcps, true));
+                        aug.set_lcp_summary(TmsLcpSummary{std::move(c.first), std::move(c.second)});
+                        std::stringstream as;
+                        aug.serialize(as);
+                        if (as.str() != ss.str()) {
+                            std::cout << "  FAILED: summaries added to a loaded index give another file than a build "
+                                         "with them, layout " << int(layout) << std::endl;
+                            assert(false && "set_lcp_summary must give the index a build with summaries gives");
+                            return false;
+                        }
+                        ++added;
+                    }
+                    TmsIndex loaded;
+                    loaded.load(ss);
+                    assert(loaded.has_lcp_summary());
+                    for (size_t k : {1, 3, 32}) {
+                        for (int access = 0; access < 4; ++access) {
+                            const bool packed = access < 2, with_pos = access % 2 == 1;
+                            std::vector<std::vector<ulint>> got, pos;
+                            tms_query_batch(k == 3 ? loaded : idx, pats, k, got, TmsMode::PHI, with_pos ? &pos : nullptr,
+                                            packed);
+                            if (got != want || (with_pos && pos != want_pos)) {
+                                std::cout << "  FAILED: " << (got != want ? "lengths" : "positions") << ", k " << k
+                                          << ", packed " << packed << ", layout " << int(layout) << ", summaries "
+                                          << (sum == &exact ? "exact" : "from minima") << std::endl;
+                                assert(false && "phi must give phi-walk's lengths and positions");
+                                return false;
+                            }
+                            ++checked;
+                            if (layout != TmsLayout::FULL) continue;
+                            got.clear();
+                            pos.clear();
+                            tms_query_batch(k == 3 ? loaded : idx, pats, k, got, TmsMode::DUAL,
+                                            with_pos ? &pos : nullptr, packed);
+                            if (got != want_dual || (with_pos && pos != want_dual_pos)) {
+                                std::cout << "  FAILED dual: " << (got != want_dual ? "lengths" : "positions") << ", k "
+                                          << k << ", packed " << packed << ", summaries "
+                                          << (sum == &exact ? "exact" : "from minima") << std::endl;
+                                assert(false && "dual must give dual-walk's lengths and positions");
+                                return false;
+                            }
+                            ++checked_dual;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "  " << checked << " phi and " << checked_dual << " dual batches over " << cont_rows
+              << " rows continuing a run, " << added << " indexes given summaries after loading, PASSED" << std::endl;
+    return true;
+}
+
 bool run_all_tests(const std::string& data_dir) {
     bool all_ran = true;
     test_orbit_structures();
@@ -2152,6 +2326,8 @@ bool run_all_tests(const std::string& data_dir) {
     if (!test_tms_vs_ms_minishred(data_dir)) all_ran = false;
     std::cout << std::endl;
     test_tms_batch(data_dir);
+    std::cout << std::endl;
+    test_tms_lcp_summary(data_dir);
     std::cout << std::endl;
     test_ftab(data_dir);
     std::cout << std::endl;
