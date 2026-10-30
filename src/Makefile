@@ -22,11 +22,11 @@ ms2-bench: $(MS_SRCS) $(MS_HDRS)
 bench: ms2-bench
 
 # Benchmark build that also counts LF fast-forward rows and reposition walk
-# lengths in ms2 batch (see MsStats), as ms2-stats.
+# lengths in query (see MsStats), as ms2-stats.
 ms2-stats: $(MS_SRCS) $(MS_HDRS)
 	$(CXX) $(CXXFLAGS) -DNDEBUG -DMS_STATS -o ms2-stats $(MS_SRCS) -lz
 
-# Benchmark build that also records, for ms2 batch and tms-batch with
+# Benchmark build that also records, for query with
 # --interleave 0, where in each read the repositions, the rows they read and
 # the query time fall (see step_stats.hpp), as ms2-steps.
 ms2-steps: $(MS_SRCS) $(MS_HDRS)
@@ -66,7 +66,7 @@ test-threads: ms2
 test-ftab: ms2
 	./test_ftab.sh ./ms2 ../data
 
-# tms-batch --report smem-all against ropebwt3 mem on a small FMD: TERALCP
+# query --report smem-all against ropebwt3 mem on a small FMD: TERALCP
 # is a TeraLCP that writes -ophi, and ROPEBWT3 the ropebwt3 to compare with
 test-rope: ms2 tools/fmd2rlbwt/fmd2rlbwt
 	@test -n "$(TERALCP)" || { echo "usage: make test-rope TERALCP=path/to/TeraLCP [ROPEBWT3=ropebwt3]"; exit 1; }

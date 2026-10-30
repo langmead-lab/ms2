@@ -1,10 +1,10 @@
 # FMD runs: the RLBWT form shared by fmd2rlbwt, Orbit and TeraLCP
 
 `fmd2rlbwt IN.fmd OUT` writes the BWT held in a ropebwt3 FMD as
-`OUT.bwt.heads` and `OUT.bwt.len`, the form `ms2 build-rlbwt` and
-`ms2 tms-build` read. This note fixes the conventions that any other producer
-of per-run data for the same BWT (TeraLCP's `-ominima`, its Phi export) must
-follow so that its records line up with these runs.
+`OUT.bwt.heads` and `OUT.bwt.len`, the form `ms2 build` reads. This note
+fixes the conventions that any other producer of per-run data for the same
+BWT (TeraLCP's `-ominima`, its Phi export) must follow so that its records
+line up with these runs.
 
 ## The BWT
 

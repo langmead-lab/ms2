@@ -1,6 +1,6 @@
 #!/bin/bash
-# Checks stored ftabs end to end.  With DATA_DIR, builds ms and tms (full,
-# psi and phi layout) indexes from the minishred RLBWT and LCP files in DATA_DIR and
+# Checks stored ftabs end to end.  With DATA_DIR, builds min, full, psi
+# and phi indexes from the minishred RLBWT and LCP files in DATA_DIR and
 # reads drawn from its text; with --indexes, takes existing ORBITIDX
 # indexes and a reads file instead.  For each index it runs ftab-build
 # (--auto and a given k), ftab-info and ftab-verify, and checks that query
@@ -29,15 +29,15 @@ else
     mkdir -p "$W"
     P="$DATA/minishred1_20_002"
     RLBWT=("$P.bwt.heads" "$P.bwt.len")
-    $M build-rlbwt "${RLBWT[@]}" "$W/mini.idx" --lcp-bin "$P.lcp" > /dev/null 2>&1 || { echo "build failed"; exit 1; }
-    $M build-rlbwt "${RLBWT[@]}" "$W/mini-split.idx" --lcp-bin "$P.lcp" --lf-split 2 > /dev/null 2>&1 || { echo "build failed"; exit 1; }
+    $M build "${RLBWT[@]}" "$W/mini.idx" --layout min --lcp-bin "$P.lcp" > /dev/null 2>&1 || { echo "build failed"; exit 1; }
+    $M build "${RLBWT[@]}" "$W/mini-split.idx" --layout min --lcp-bin "$P.lcp" --lf-split 2 > /dev/null 2>&1 || { echo "build failed"; exit 1; }
     for l in full psi phi; do
         lcp=(--lcp-bin "$P.lcp")
         [ $l = psi ] && lcp=()
-        $M tms-build "${RLBWT[@]}" "$W/mini-$l.tms" ${lcp[@]+"${lcp[@]}"} --layout $l > /dev/null 2>&1 || { echo "tms-build failed"; exit 1; }
+        $M build "${RLBWT[@]}" "$W/mini-$l.tms" ${lcp[@]+"${lcp[@]}"} --layout $l > /dev/null 2>&1 || { echo "build --layout $l failed"; exit 1; }
     done
-    $M tms-build "${RLBWT[@]}" "$W/mini-full-split.tms" --lcp-bin "$P.lcp" --lf-split 2 > /dev/null 2>&1 || { echo "tms-build failed"; exit 1; }
-    $M tms-text "$W/mini-full.tms" 2> /dev/null > "$W/text.txt"
+    $M build "${RLBWT[@]}" "$W/mini-full-split.tms" --layout full --lcp-bin "$P.lcp" --lf-split 2 > /dev/null 2>&1 || { echo "build failed"; exit 1; }
+    $M text "$W/mini-full.tms" 2> /dev/null > "$W/text.txt"
     python3 - "$W" <<'PY'
 import random, sys
 d = sys.argv[1]
@@ -65,7 +65,7 @@ PY
     $M ftab-build "$W/mini-full-split.tms" "$W/mini-full-split.ftab" --kmer-len 6 > /dev/null || fail "ftab-build mini-full-split.tms"
 fi
 
-tool_of() { "$M" index-plan "$1" 2> /dev/null | grep -q 'tool: tms' && echo tms || echo ms; }
+tool_of() { "$M" index-plan "$1" 2> /dev/null | grep -q 'layout: min' && echo ms || echo tms; }
 
 cd "$W"
 for idx in "${INDEXES[@]}"; do

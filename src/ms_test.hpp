@@ -16,7 +16,7 @@ namespace ms_test {
  * Run all MS tests. Returns true if all pass.  The minishred fixture is
  * three files in data_dir: minishred1_20_002.bwt.heads and .bwt.len, an
  * RLBWT, and minishred1_20_002.lcp, one 64-bit LCP per row (the inputs of
- * build-rlbwt --lcp-bin).
+ * build --lcp-bin).
  */
 bool run_all_tests(const std::string& data_dir);
 

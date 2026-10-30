@@ -933,8 +933,8 @@ inline void tms_query_batch(TmsIndex& idx, const std::vector<std::string>& patte
         throw std::invalid_argument("this mode needs an index with psi");
     if ((mode == TmsMode::PHI || mode == TmsMode::DUAL) && !idx.has_lcp_summary())
         throw std::invalid_argument(std::string("--mode ") + (mode == TmsMode::PHI ? "phi" : "dual") +
-                                    " needs an index with LCP summaries (tms-build with --minima or --lcp-bin, or "
-                                    "tms-add-summary); --mode phi-walk and dual-walk read one without them");
+                                    " needs an index with LCP summaries (build with --minima or --lcp-bin, or "
+                                    "index-add-lcp-summary); --mode phi-walk and dual-walk read one without them");
     if (ft && (oracle || record))
         throw std::invalid_argument("recording or replaying repositions takes no ftab, which skips some of them");
     if (ft && (mode != TmsMode::PSI || out_pos) && !ft->has_toehold())

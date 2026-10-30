@@ -604,7 +604,7 @@ bool test_ms_query_vs_naive_mutated(const std::string& data_dir) {
  * Build the same index two ways and check that they answer identically: from
  * each run's full LCP vector, and from the retained LCP pairs round-tripped
  * through a TLMSM minima file, the form TeraLCP -ominima writes and
- * build-rlbwt --minima reads.  Also checks that write_rlbwt and load_rlbwt
+ * build --layout min --minima reads.  Also checks that write_rlbwt and load_rlbwt
  * round-trip the RLBWT.
  */
 bool test_rlbwt_input_path(const std::string& data_dir) {
@@ -1106,7 +1106,7 @@ static bool same_answers(MSIndexSpillLCP<false>& unsplit, MSIndexSpillLCP<false>
  * LF splitting (apply_lf_splitting) must not change any result.  On the fuzz
  * texts and minishred, for several LF splits and build options, compare split
  * indexes, built from full LCPs as build does and from minima-only retained
- * pairs as build-rlbwt does with a minima file, with unsplit references.
+ * pairs as build --layout min does with a minima file, with unsplit references.
  * The split index's rows must be Orbit's LF intervals.
  * Split parameters that do not split are refused.
  */
@@ -1291,7 +1291,7 @@ bool test_streaming_build(const std::string& data_dir) {
                 ++checks;
             }
         }
-        // As build-rlbwt with a minima file: retained pairs in memory and in a file.
+        // As build --layout min with a minima file: retained pairs in memory and in a file.
         ms_io::BuildOptions o;
         o.minima_only = true; o.percentile_k = 0.9; o.coalesce = true; o.spill_split_bits = 6;
         const auto pairs = retained_lcp_pairs(in.lcps, true);

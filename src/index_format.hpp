@@ -117,6 +117,9 @@ inline const char* layout_name(Layout l) {
     return "?";
 }
 
+/** The layout an index's header names: min for an ms index, else its tms layout. */
+inline const char* index_layout_name(Tool t, Layout l) { return t == Tool::MS ? "min" : layout_name(l); }
+
 constexpr uint32_t section_bit(Section s) { return uint32_t(1) << static_cast<unsigned>(s); }
 
 struct SectionEntry {

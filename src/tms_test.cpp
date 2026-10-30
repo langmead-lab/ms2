@@ -929,7 +929,7 @@ TmsIndex round_trip(TmsIndex& idx, const TmsParts* need = nullptr) {
     return loaded;
 }
 
-/** One query's output, as tms-batch would print it: lengths, positions and SMEMs per pattern. */
+/** One query's output, as query would print it: lengths, positions and SMEMs per pattern. */
 std::vector<std::string> query_output(TmsIndex& idx, const std::vector<std::string>& pats, size_t k, TmsMode mode,
                                       bool positions, TmsReport report, bool packed) {
     std::vector<std::vector<ulint>> len, pos;
@@ -2082,7 +2082,7 @@ bool test_ftab_link(const std::string& data_dir) {
             const orbit_idx::Header hm = header_of(mi);
             ftab::FileHeader hmf;
             ftab_round_trip(ftab::build_ms(mi, 3, 1).tab, hm, hmf);
-            if (!mismatch(hmf, hx, "tool") || !mismatch(h, hm, "tool")) return false;
+            if (!mismatch(hmf, hx, "layout") || !mismatch(h, hm, "layout")) return false;
         }
     }
     std::cout << "  " << refused << " mismatches named PASSED" << std::endl;
@@ -2176,7 +2176,7 @@ TmsLcpSummary exact_summaries(const std::vector<uchar>& heads, const std::vector
  * rows.  The summaries come from each run's minima-only pairs, as from a
  * minima file, and also, exactly, from the full LCPs.  Summaries from the
  * pairs added to a loaded index built without them (set_lcp_summary, as
- * tms-add-summary does) give the file a build with them writes.  PHI and
+ * index-add-lcp-summary does) give the file a build with them writes.  PHI and
  * DUAL refuse an index without summaries.  Runs on the fuzz texts and, if
  * its LF is a single cycle, on minishred.
  */

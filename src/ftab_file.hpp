@@ -296,8 +296,8 @@ inline std::string link_mismatch(const FileHeader& f, const orbit_idx::Header& i
         os << field << ": the ftab was built from " << want << ", the index has " << got;
         return true;
     };
-    auto tool = [](orbit_idx::Tool t) { return t == orbit_idx::Tool::MS ? "ms" : t == orbit_idx::Tool::TMS ? "tms" : "?"; };
-    if (differs("tool", std::string(tool(f.tool)), std::string(tool(ih.tool))) || differs("layout", std::string(orbit_idx::layout_name(f.layout)), std::string(orbit_idx::layout_name(ih.layout))) ||
+    if (differs("layout", std::string(orbit_idx::index_layout_name(f.tool, f.layout)),
+                std::string(orbit_idx::index_layout_name(ih.tool, ih.layout))) ||
         differs("n", f.n, ih.n) || differs("BWT runs", f.bwt_runs, ih.bwt_runs) ||
         differs("index format version", f.index_version, orbit_idx::FORMAT_VERSION))
         return os.str();
@@ -346,7 +346,7 @@ inline void describe(const FileHeader& h, std::ostream& os) {
     os << "; total " << s.payload_bytes() << " bytes";
     if (h.index_bytes > 0) os << " = " << 100.0 * double(s.payload_bytes()) / double(h.index_bytes) << "% of the index's " << h.index_bytes;
     os << "\n";
-    os << "index: tool=" << (h.tool == orbit_idx::Tool::MS ? "ms" : "tms") << " layout=" << orbit_idx::layout_name(h.layout)
+    os << "index: layout=" << orbit_idx::index_layout_name(h.tool, h.layout)
        << " n=" << h.n << " bwt_runs=" << h.bwt_runs << " format_version=" << h.index_version << "\n";
     for (const auto& e : h.link) {
         os << "  link " << orbit_idx::section_name(e.id) << ": rows=" << e.rows << " domain=" << e.domain

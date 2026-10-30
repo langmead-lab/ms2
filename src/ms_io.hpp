@@ -1,6 +1,6 @@
 /**
  * Build MSIndexSpillLCP from an RLBWT and its per-row LCPs held in memory, or
- * from the files build-rlbwt --lcp-bin reads (see rlbwt_io.hpp).
+ * from the files build --lcp-bin reads (see rlbwt_io.hpp).
  *
  * Author: Ben Langmead (langmea@cs.jhu.edu)
  * Date: Feb 17, 2026
@@ -56,7 +56,7 @@ build_ms_index_spill(std::vector<uchar> bwt_heads, std::vector<ulint> bwt_run_le
 
 /**
  * Load an RLBWT and the LCP of each of its rows from PREFIX.bwt.heads,
- * PREFIX.bwt.len and PREFIX.lcp, the files build-rlbwt --lcp-bin reads.  Each
+ * PREFIX.bwt.len and PREFIX.lcp, the files build --lcp-bin reads.  Each
  * run's LCP vector holds its rows' LCPs in order, its top first.  Returns
  * false, after printing why to stderr, if a file is missing or malformed.
  */

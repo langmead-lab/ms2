@@ -193,7 +193,7 @@ inline Built build_tms(TmsIndex& idx, const Shape& shape, size_t threads) {
         PhiPos ph;  // the toehold, with Toehold
     };
     const bool psi = idx.has_psi();
-    if (!psi && !Toehold) throw std::invalid_argument("a tms ftab needs an index with psi or phi");
+    if (!psi && !Toehold) throw std::invalid_argument("an ftab needs an index with psi or phi");
     Built b{Ftab(shape), {}};
     const ulint last_run = idx.move_runs() - 1;
     // Whether the dist PLCP values from phi point p on are all at least cap.
@@ -280,9 +280,9 @@ inline Built build_tms(TmsIndex& idx, const Shape& shape, size_t threads) {
  * positions phi's starts-based form.
  */
 inline Built build_tms(TmsIndex& idx, const Shape& shape, size_t threads) {
-    if (shape.toehold && !idx.has_phi()) throw std::invalid_argument("a tms ftab with a toehold needs phi");
+    if (shape.toehold && !idx.has_phi()) throw std::invalid_argument("an ftab with a toehold needs phi");
     if (shape.window && !idx.has_phi_starts())
-        throw std::invalid_argument("a tms ftab with window positions needs phi's starts-based form");
+        throw std::invalid_argument("an ftab with window positions needs phi's starts-based form");
     if (!shape.toehold) return detail::build_tms<false, false>(idx, shape, threads);
     if (idx.has_phi_starts()) return detail::build_tms<true, true>(idx, shape, threads);
     return detail::build_tms<true, false>(idx, shape, threads);

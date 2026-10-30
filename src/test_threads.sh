@@ -1,5 +1,5 @@
 #!/bin/bash
-# Checks that query output on ms and tms indexes is byte-identical for every
+# Checks that query output on min and full indexes is byte-identical for every
 # combination of interleave depth, thread count and block size, on indexes built
 # from the minishred RLBWT and LCP files in DATA_DIR and reads drawn from its
 # text with substitutions, plus random reads, empty reads and reads with N.
@@ -10,10 +10,11 @@ DATA=$2
 W=${3:-$(mktemp -d)}
 mkdir -p "$W"
 P="$DATA/minishred1_20_002"
-$M build-rlbwt "$P.bwt.heads" "$P.bwt.len" "$W/mini.idx" --lcp-bin "$P.lcp" > /dev/null 2>&1 || { echo "build failed"; exit 1; }
-$M tms-build "$P.bwt.heads" "$P.bwt.len" "$W/mini.tms" --lcp-bin "$P.lcp" > /dev/null 2>&1 || { echo "tms-build failed"; exit 1; }
-$M tms-build "$P.bwt.heads" "$P.bwt.len" "$W/nosum.tms" --lcp-bin "$P.lcp" --no-lcp-summary > /dev/null 2>&1 || { echo "tms-build --no-lcp-summary failed"; exit 1; }
-$M tms-text "$W/mini.tms" 2> /dev/null > "$W/text.txt"
+$M build "$P.bwt.heads" "$P.bwt.len" "$W/mini.idx" --layout min --lcp-bin "$P.lcp" > /dev/null 2>&1 || { echo "build --layout min failed"; exit 1; }
+$M build "$P.bwt.heads" "$P.bwt.len" "$W/mini.tms" --layout full --lcp-bin "$P.lcp" > /dev/null 2>&1 || { echo "build --layout full failed"; exit 1; }
+$M build "$P.bwt.heads" "$P.bwt.len" "$W/nosum.tms" --layout full --lcp-bin "$P.lcp" --no-lcp-summary > /dev/null 2>&1 || { echo "build --no-lcp-summary failed"; exit 1; }
+$M text "$W/mini.tms" 2> /dev/null > "$W/text.txt"
+$M text "$W/mini.idx" 2> /dev/null | cmp -s - "$W/text.txt" || { echo "text differs between the min and full indexes"; exit 1; }
 python3 - "$W" <<'PY'
 import random, sys
 d = sys.argv[1]
@@ -161,13 +162,15 @@ done; done; done
 $M query mini.idx m.fa -o o.out --orient qual 2> /dev/null && { echo "orient qual accepted FASTA"; fails=$((fails + 1)); }
 $M query mini.tms m.fa -o o.out --orient rc --mode phi --positions 2> /dev/null && { echo "orient rc accepted --positions"; fails=$((fails + 1)); }
 $M query mini.tms m.fa -o o.out --orient rc --report smem-one 2> /dev/null && { echo "orient rc accepted an SMEM report"; fails=$((fails + 1)); }
-# query picks the engine from the index's header and refuses, on an ms
-# index, the options only a tms index serves.
+# query picks the engine from the index's header and refuses, on a min
+# index, the options and modes only a psi, phi or full index serves.
 for o in --positions "--report smem-one" "--report smem-all" --phi-starts "--mode psi" "--mode phi" "--mode phiskip" "--mode dual" "--min-smem-len 5" "--max-smem-positions 3"; do
     # shellcheck disable=SC2086
-    $M query mini.idx m.fa -o o.out $o 2> /dev/null && { echo "ms index accepted $o"; fails=$((fails + 1)); }
+    $M query mini.idx m.fa -o o.out $o 2> /dev/null && { echo "min index accepted $o"; fails=$((fails + 1)); }
 done
-$M query mini.tms m.fa -o o.out --mode standard 2> /dev/null && { echo "tms index accepted --mode standard"; fails=$((fails + 1)); }
+$M query mini.tms m.fa -o o.out --mode min 2> /dev/null && { echo "full index accepted --mode min"; fails=$((fails + 1)); }
+$M query mini.idx m.fa -o o.out --mode standard 2> /dev/null && { echo "min index accepted --mode standard"; fails=$((fails + 1)); }
+cmp -s ref.m.fa <($M query mini.idx m.fa -o /dev/stdout --mode min 2> /dev/null) || { echo "differs: --mode min"; fails=$((fails + 1)); }
 # An index built without LCP summaries serves phi-walk and dual-walk, not
 # phi and dual.
 for o in phi dual; do
@@ -176,7 +179,7 @@ done
 $M query mini.tms reads.fa -o sum.pos --mode phi --positions 2> /dev/null
 $M query nosum.tms reads.fa -o o.out --mode phi-walk --positions 2> /dev/null || { echo "an index without summaries refused phi-walk"; fails=$((fails + 1)); }
 cmp -s sum.pos o.out || { echo "differs: phi-walk without summaries"; fails=$((fails + 1)); }
-$M query mini.idx reads.fa -o o.out --report ms 2> /dev/null || { echo "ms index refused --report ms"; fails=$((fails + 1)); }
+$M query mini.idx reads.fa -o o.out --report ms 2> /dev/null || { echo "min index refused --report ms"; fails=$((fails + 1)); }
 # Values given as --name=VALUE are the same as --name VALUE.
 $M query mini.tms reads.fa -o eq1.out --mode phi --positions --threads 3 --block-reads 13 2> /dev/null
 $M query mini.tms reads.fa -o=eq2.out --mode=phi --positions --threads=3 --block-reads=13 2> /dev/null
@@ -216,9 +219,9 @@ $M query mini.tms reads.fa -o o.out --mode oracle-scan 2> /dev/null && { echo "o
 $M query mini.tms m.fa -o o.out --mode oracle --oracle ref.orc 2> /dev/null && { echo "oracle accepted other reads"; fails=$((fails + 1)); }
 echo "checked oracle"
 
-# The same for query on the ms index: recordings with any K, T and B are the
+# The same for query on the min index: recordings with any K, T and B are the
 # same file, and oracle and oracle-scan replays of it, with any K, T and B
-# and with --orient rc, give the standard mode's output.
+# and with --orient rc, give the min mode's output.
 $M query mini.idx reads.fa -o ms_ref.out --oracle-write ms_ref.orc 2> err.txt || { echo "failed: ms query --oracle-write"; cat err.txt; exit 1; }
 cmp -s ms_ref.out <($M query mini.idx reads.fa -o /dev/stdout 2> /dev/null) || { echo "differs: ms query recording"; fails=$((fails + 1)); }
 for rec in "0 1 1000" "7 3 13" "32 8 1"; do
@@ -239,10 +242,10 @@ for om in oracle oracle-scan; do
     cmp -s ms_ref.rc o.out || { echo "differs: ms query $om --orient rc"; fails=$((fails + 1)); }
 done
 # Refused: an oracle mode without an oracle, an oracle for other reads, the
-# tms index's oracle (other LF intervals), and recording with an ftab.
+# full index's oracle (other LF intervals), and recording with an ftab.
 $M query mini.idx reads.fa -o o.out --mode oracle 2> /dev/null && { echo "ms query oracle accepted no oracle"; fails=$((fails + 1)); }
 $M query mini.idx m.fa -o o.out --mode oracle-scan --oracle ms_ref.orc 2> /dev/null && { echo "ms query oracle-scan accepted other reads"; fails=$((fails + 1)); }
-$M query mini.idx reads.fa -o o.out --mode oracle --oracle ref.orc 2> /dev/null && { echo "ms query accepted the tms index's oracle"; fails=$((fails + 1)); }
+$M query mini.idx reads.fa -o o.out --mode oracle --oracle ref.orc 2> /dev/null && { echo "ms query accepted the full index's oracle"; fails=$((fails + 1)); }
 $M query mini.idx reads.fa -o o.out --build-ftab=4 --oracle-write o.orc 2> /dev/null && { echo "ms query recorded with an ftab"; fails=$((fails + 1)); }
 echo "checked ms query oracle"
 

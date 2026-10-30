@@ -41,7 +41,7 @@
 #include <utility>
 #include <vector>
 
-/** What tms-batch reports for each read. */
+/** What query reports for each read. */
 enum class TmsReport {
     MS,        // matching statistics only
     SMEM_ONE,  // plus one SA entry per SMEM
@@ -428,7 +428,7 @@ inline void tms_report_smems_batch(TmsIndex& idx, const std::vector<std::vector<
 }
 
 /**
- * Append hits to line as space-separated i:L:p (tms-batch's smem-one field),
+ * Append hits to line as space-separated i:L:p (query's smem-one field),
  * or i:L:c:p1,p2,... for SMEM_ALL, with count c and the listed positions.
  */
 inline void tms_format_smems(const TmsSmemHits& hits, TmsReport report, std::string& line) {

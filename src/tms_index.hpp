@@ -997,7 +997,7 @@ public:
     static TmsParts held_parts(const std::string& path) { return held_parts(orbit_idx::read_header_file(path)); }
     static TmsParts held_parts(const orbit_idx::Header& h) {
         using orbit_idx::Section;
-        if (h.tool != orbit_idx::Tool::TMS) throw std::runtime_error("not a tms index");
+        if (h.tool != orbit_idx::Tool::TMS) throw std::runtime_error("not a psi, phi or full index");
         const bool phi = h.find(Section::PHI_LEN) && h.find(Section::PHI_START);
         return TmsParts{h.find(Section::F_STARTS) != nullptr, phi, phi && h.find(Section::PHI_INV) != nullptr, phi};
     }
@@ -1224,7 +1224,7 @@ private:
         rd.load_move_table(Section::LF, lf_, LF_COLS, SUMMARY_COLS);
         if (wants(Section::F_STARTS)) {
             const std::vector<uint64_t> v = rd.load_u64s(Section::F_STARTS);
-            if (v.size() != F_BLOCKS) throw std::runtime_error("tms index has another number of F block starts");
+            if (v.size() != F_BLOCKS) throw std::runtime_error("index has another number of F block starts");
             for (size_t i = 0; i < F_BLOCKS; ++i) f_rows_[i] = v[i];
         }
         has_psi_ = want.psi;
@@ -1239,14 +1239,14 @@ private:
         if (const SectionEntry* e = h.find(Section::SEQ_IDS); e && wants(Section::SEQ_IDS)) {
             seq_ids_ = SeqIdTable::from_payload(rd.load_bytes(Section::SEQ_IDS, Kind::SEQ_TABLE), e->rows);
             const std::string bad = seq_ids_mismatch(*seq_ids_, h.n);
-            if (!bad.empty()) throw std::runtime_error("tms index's SEQ_IDS section does not fit it: " + bad);
+            if (!bad.empty()) throw std::runtime_error("index's SEQ_IDS section does not fit it: " + bad);
         }
         complete_ = !need || (want.psi == held.psi && want.phi == held.phi && has_phi_inv_ == held.phi_inv &&
                               (!held.phi || (has_phi_len_ && has_phi_starts_)) &&
                               (seq_ids_.has_value() || !h.find(Section::SEQ_IDS)));
         info_ = h.info;
         compute_occurs();
-        if (h.bwt_runs != bwt_runs_) throw std::runtime_error("tms index's BWT runs disagree with its header");
+        if (h.bwt_runs != bwt_runs_) throw std::runtime_error("index's BWT runs disagree with its header");
         if (has_phi_inv_) build_start_tables();
     }
 
@@ -1259,11 +1259,10 @@ private:
         else return;
         // The smallest layout with every part the query needs.
         std::string build = want.psi && want.phi ? "full" : want.psi ? "psi or full" : "phi or full";
-        if (want.phi) build += ", with --minima or --lcp-bin";
         if (want.phi_inv) build += " and without --no-phi-inv";
         throw std::runtime_error("this query needs " + missing + ", which this index (layout " + layout_name(held) +
                                  (held.phi && !held.phi_inv ? ", without phi_inv" : "") +
-                                 ") lacks; build one with tms-build --layout " + build);
+                                 ") lacks; build one with build --layout " + build);
     }
 
     // Derived fields: which characters occur, the BWT runs, and each F
@@ -1565,7 +1564,7 @@ private:
             if (pos != lf.first() || std::find(seen.begin(), seen.end(), false) != seen.end())
                 throw std::runtime_error("LF is not a single cycle (a string collection, such as an FMD, with one "
                                          "terminator per string); building phi by an LF walk needs one terminator, "
-                                         "so build it from TeraLCP -ophi samples (tms-build --phi) instead");
+                                         "so build it from TeraLCP -ophi samples (build --phi) instead");
         }
         // Which LF intervals' bytes differ from the one before's (k = 0
         // counts as differing), after which release_enc may free lf_enc.

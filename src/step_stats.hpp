@@ -14,7 +14,7 @@
  * text, which the read's matching statistics say.  An index whose text holds
  * N (an FMD's, for one) matches a read's N rather than restarting there, but
  * an ftab over ACGT has no entry for a window holding one either way.  Reads are recorded only when one is in flight
- * at a time (ms2 batch and tms-batch with --interleave 0).
+ * at a time (query with --interleave 0).
  */
 
 #ifndef _STEP_STATS_HPP

@@ -680,14 +680,14 @@ public:
         using namespace orbit_idx;
         Reader rd(in);
         const Header& h = rd.header();
-        if (h.tool != Tool::MS) throw std::runtime_error("not an ms index");
+        if (h.tool != Tool::MS) throw std::runtime_error("not a min index");
         max_lcp_top_ = h.scalars[0];
         max_lcp_min_sub_ = h.scalars[1];
         spill_align_ = h.scalars[2];
         spill_split_bits_ = static_cast<uchar>(h.scalars[3]);
         const ulint expected = (spill_split_bits_ > 0) ? (ulint{1} << spill_split_bits_) : 1;
         if (rd.entry(Section::MS_SPILL, Kind::SPILL_ARRAYS).rows != expected || spill_align_ == 0)
-            throw std::runtime_error("inconsistent ms index settings");
+            throw std::runtime_error("inconsistent min index settings");
         rd.load_move_table(Section::LF, idx_, LF_COLS);
         spill_vectors_ = rd.load_arrays(Section::MS_SPILL);
         info_ = h.info;

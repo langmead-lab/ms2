@@ -3,7 +3,7 @@
 #
 # A multi-contig reference with repeats (some reverse-complemented) is
 # indexed by ropebwt3, converted with fmd2rlbwt and TeraLCP -ophi and built
-# into a tms index twice: with tms-build --seq-ids and its .len.gz, and
+# into a full index twice: with build --seq-ids and its .len.gz, and
 # without, the table then added by index-add-seq-ids.  The two must be equal
 # apart from their provenance, and the second must keep the first index's
 # sections byte for byte.  For each cap N and minimum length, ropebwt3 mem
@@ -16,8 +16,8 @@
 # output must be the same but for text positions in place of the contig
 # positions, and those must give the contig positions when mapped by hand.
 # A table whose text length is not the index's must be refused by both
-# tms-build and index-add-seq-ids, and one whose string count is not the
-# text's by tms-build, which counts the strings; one that fits both but
+# build and index-add-seq-ids, and one whose string count is not the
+# text's by build, which counts the strings; one that fits both but
 # splits the text at other points must make query fail when a match
 # crosses a contig's end.
 # smem-all with --positions must be refused.  Every counting method (--count
@@ -83,8 +83,8 @@ EOF
 "$RB3" ssa -o "$W/ref.fmd.ssa" "$W/ref.fmd" 2>/dev/null
 "$FMD2RLBWT" "$W/ref.fmd" "$W/ref" >/dev/null
 "$TERALCP" -f fmd -i "$W/ref.fmd" -ophi "$W/ref.phi" -ominima "$W/ref.min" -t "$W/teralcp.tmp" -v quiet
-"$MS" tms-build "$W/ref.bwt.heads" "$W/ref.bwt.len" "$W/plain.idx" --phi "$W/ref.phi" --minima "$W/ref.min" >/dev/null 2>&1
-"$MS" tms-build "$W/ref.bwt.heads" "$W/ref.bwt.len" "$W/ref.idx" --phi "$W/ref.phi" --minima "$W/ref.min" \
+"$MS" build "$W/ref.bwt.heads" "$W/ref.bwt.len" "$W/plain.idx" --layout full --phi "$W/ref.phi" --minima "$W/ref.min" >/dev/null 2>&1
+"$MS" build "$W/ref.bwt.heads" "$W/ref.bwt.len" "$W/ref.idx" --layout full --phi "$W/ref.phi" --minima "$W/ref.min" \
     --seq-ids "$W/ref.fmd.len.gz" >/dev/null 2>&1
 "$MS" index-add-seq-ids "$W/plain.idx" "$W/ref.fmd.len.gz" "$W/added.idx" >/dev/null
 "$MS" index-verify "$W/added.idx" >/dev/null
@@ -99,12 +99,12 @@ def parse(p):
 plain, built, added = (parse(f'{w}/{x}.idx') for x in ('plain', 'ref', 'added'))
 # Equal but for the info text and its size.
 assert built[1] == added[1] and built[2] == added[2] and built[0][4096:] == added[0][4096:], \
-    'tms-build --seq-ids and index-add-seq-ids differ'
+    'build --seq-ids and index-add-seq-ids differ'
 # The copy keeps the sections of the index it was given, at their offsets.
 assert added[2][:-1] == plain[2] and added[0][4096:len(plain[0])] == plain[0][4096:], \
     'index-add-seq-ids changed a section'
 assert added[3].startswith(plain[3]) and 'seq_ids_from=' in added[3]
-print('tms-build --seq-ids and index-add-seq-ids agree; the copied sections are unchanged')
+print('build --seq-ids and index-add-seq-ids agree; the copied sections are unchanged')
 PYEOF
 
 for cap in 1 3 100 0; do
@@ -202,23 +202,23 @@ done
 # A table for another text is refused when it is stored.
 for cmd in build add; do
     if [ $cmd = build ]; then
-        run=("$MS" tms-build "$W/ref.bwt.heads" "$W/ref.bwt.len" "$W/bad.idx" --phi "$W/ref.phi" --minima "$W/ref.min" --seq-ids "$W/short.len.gz")
+        run=("$MS" build "$W/ref.bwt.heads" "$W/ref.bwt.len" "$W/bad.idx" --layout full --phi "$W/ref.phi" --minima "$W/ref.min" --seq-ids "$W/short.len.gz")
     else
         run=("$MS" index-add-seq-ids "$W/plain.idx" "$W/short.len.gz" "$W/bad.idx")
     fi
     if "${run[@]}" > "$W/bad.err" 2>&1; then echo "$cmd accepted short.len.gz"; exit 1; fi
     echo "$cmd refused short.len.gz: $(tail -1 "$W/bad.err" | sed "s|$W/||g")"
 done
-# tms-build counts the text's strings, which the header does not give.
-if "$MS" tms-build "$W/ref.bwt.heads" "$W/ref.bwt.len" "$W/bad.idx" --phi "$W/ref.phi" --minima "$W/ref.min" \
+# build counts the text's strings, which the header does not give.
+if "$MS" build "$W/ref.bwt.heads" "$W/ref.bwt.len" "$W/bad.idx" --layout full --phi "$W/ref.phi" --minima "$W/ref.min" \
     --seq-ids "$W/merged.len.gz" > "$W/bad.err" 2>&1; then
-    echo "tms-build accepted a table with a string count other than the text's"; exit 1
+    echo "build accepted a table with a string count other than the text's"; exit 1
 fi
 grep -q strings "$W/bad.err" || { echo "the merged table was not refused for its string count"; exit 1; }
 echo "build refused merged.len.gz: $(tail -1 "$W/bad.err" | sed "s|$W/||g")"
 # A table that fits the text's length and string count but splits it
 # elsewhere is stored, and query fails when a match crosses an end.
-"$MS" tms-build "$W/ref.bwt.heads" "$W/ref.bwt.len" "$W/shifted.idx" --phi "$W/ref.phi" --minima "$W/ref.min" \
+"$MS" build "$W/ref.bwt.heads" "$W/ref.bwt.len" "$W/shifted.idx" --layout full --phi "$W/ref.phi" --minima "$W/ref.min" \
     --seq-ids "$W/shifted.len.gz" >/dev/null 2>&1
 if "$MS" query "$W/shifted.idx" "$W/reads.fa" --report smem-all --max-smem-positions 3 \
     -o "$W/bad.out" 2> "$W/bad.err"; then

@@ -122,7 +122,7 @@ std::vector<ulint> naive_ms(const std::vector<std::string>& strs, const std::str
     return ms;
 }
 
-/** Load raw heads and lengths through files, as build-rlbwt and tms-build do. */
+/** Load raw heads and lengths through files, as build does. */
 void load_through_files(const std::string& dir, const std::vector<uchar>& raw_heads, const std::vector<ulint>& lens,
                         std::vector<uchar>& heads, std::vector<ulint>& lens_out) {
     const std::string hp = dir + "/.fmd_test.heads", lp = dir + "/.fmd_test.len";
@@ -137,7 +137,7 @@ void load_through_files(const std::string& dir, const std::vector<uchar>& raw_he
     assert(lens_out == lens);
 }
 
-/** An ms index from loaded heads and lengths and retained (minima-only) LCP pairs, as build-rlbwt makes it. */
+/** An ms index from loaded heads and lengths and retained (minima-only) LCP pairs, as build --layout min makes it. */
 MSIndexSpillLCP<false> build_ms(std::vector<uchar> heads, std::vector<ulint> lens, std::vector<RunLcpPairs> pairs) {
     apply_lf_splitting(heads, lens, pairs, orbit::split_params{}, true);
     auto [run_data, spill, max_top, max_sub, skinny, jumbo] =
@@ -180,7 +180,7 @@ void check_queries(MSIndexSpillLCP<false>& ms, TmsIndex& tms, const std::vector<
 }
 
 /**
- * Read every string back with LF from the terminator rows, as tms-text does
+ * Read every string back with LF from the terminator rows, as text does
  * for a collection, and compare with the strings as a multiset.
  */
 void check_strings(TmsIndex& tms, std::vector<std::string> strs) {

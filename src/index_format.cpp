@@ -41,8 +41,8 @@ const char* kind_name(Kind k) {
 }  // namespace
 
 void describe_header(const Header& h, std::ostream& os) {
-    os << "format: ORBITIDX v" << FORMAT_VERSION << "  tool: " << (h.tool == Tool::MS ? "ms" : "tms")
-       << "  layout: " << layout_name(h.layout) << "  n=" << h.n << "  bwt_runs=" << h.bwt_runs << "\n";
+    os << "format: ORBITIDX v" << FORMAT_VERSION << "  layout: " << index_layout_name(h.tool, h.layout)
+       << "  n=" << h.n << "  bwt_runs=" << h.bwt_runs << "\n";
     if (h.tool == Tool::MS)
         os << "scalars: max_lcp_top=" << h.scalars[0] << " max_lcp_min_sub=" << h.scalars[1]
            << " spill_align=" << h.scalars[2] << " spill_split_bits=" << h.scalars[3] << "\n";

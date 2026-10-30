@@ -67,59 +67,56 @@ static void usage(std::ostream& os, bool advanced = false) {
        << "Options take their value as --name VALUE or --name=VALUE.\n"
        << "\n"
        << "Build an index:\n"
-       << "  build-rlbwt HEADS LENS INDEX (--minima FILE | --lcp-bin FILE) [--lf-split FACTOR]\n"
-       << "      Build an ms index from an RLBWT (HEADS: one byte per run; LENS:\n"
-       << "      fixed-width little-endian run lengths) and LCP input: a TeraLCP\n"
-       << "      -ominima file, or --lcp-bin, one 64-bit LCP per row, optionally after\n"
-       << "      a 64-bit row count.  --lf-split sets Orbit's balancing factor for LF\n"
-       << "      (positive; default: Orbit's default).  Results do not depend on it.\n"
-       << "  tms-build HEADS LENS INDEX [--minima FILE | --lcp-bin FILE] [--phi FILE]\n"
-       << "            [--layout full|psi|phi] [--seq-ids FILE] [--no-phi-inv]\n"
-       << "            [--lf-split FACTOR] [--phi-split FACTOR]\n"
-       << "      Build a tms index.  LF and psi need no LCP input.  phi, phi_inv and\n"
-       << "      the LCP summaries --mode phi and dual read (each LF row's LCP at its\n"
-       << "      head and least LCP below it) need --minima (a TeraLCP -ominima file)\n"
-       << "      or --lcp-bin.  Alone, these need a BWT with one terminator; with\n"
-       << "      --phi (a TeraLCP -ophi file of the same BWT), phi comes from its\n"
+       << "  build HEADS LENS INDEX --layout min|psi|phi|full [--minima FILE] [--phi FILE]\n"
+       << "        [--seq-ids FILE] [--no-phi-inv] [--lf-split FACTOR] [--phi-split FACTOR]\n"
+       << "      Build an index from an RLBWT (HEADS: one byte per run; LENS:\n"
+       << "      fixed-width little-endian run lengths).  --layout, which has no\n"
+       << "      default, says what the index keeps and so which --mode it serves:\n"
+       << "        min   LF with each row's LCP minima; serves --mode min\n"
+       << "        psi   LF and psi; serves --mode psi without positions or SMEMs\n"
+       << "        phi   LF, phi, phi_inv and LCP summaries (each LF row's LCP at its\n"
+       << "              head and least LCP below it); serves --mode phi, positions\n"
+       << "              and SMEMs\n"
+       << "        full  everything psi and phi keep; serves every mode\n"
+       << "      Every layout but psi needs --minima, a TeraLCP -ominima file.\n"
+       << "      Alone, it needs a BWT with one terminator; with --phi (a TeraLCP\n"
+       << "      -ophi file of the same BWT), a phi or full index takes phi from its\n"
        << "      samples and the BWT may have one terminator per string, as an FMD\n"
-       << "      does.  --layout keeps what some queries read: full (default) keeps\n"
-       << "      everything; psi keeps LF and psi and serves only --mode psi without\n"
-       << "      positions or SMEMs; phi keeps LF, phi, phi_inv and the summaries and\n"
-       << "      serves every query but --mode psi and dual.  --no-phi-inv drops\n"
-       << "      phi_inv, which only --report smem-all reads.  --seq-ids stores\n"
-       << "      ropebwt3's sequence-ID table (the FMD's .len.gz) for smem-all.\n"
-       << "      --phi-split 0 leaves phi unsplit.\n"
+       << "      does.  --no-phi-inv drops phi_inv, which only --report smem-all\n"
+       << "      reads.  --seq-ids stores ropebwt3's sequence-ID table (the FMD's\n"
+       << "      .len.gz) for smem-all.  --lf-split sets Orbit's balancing factor for\n"
+       << "      LF (positive; default: Orbit's default) and --phi-split for phi (0\n"
+       << "      leaves phi unsplit).  Results do not depend on either.  build refuses\n"
+       << "      the options its layout does not take.\n"
        << "\n"
        << "Query:\n"
        << "  query INDEX READS [options]\n"
        << "      Compute matching statistics for every read in READS (FASTA, FASTQ,\n"
-       << "      or one sequence per line; - for stdin) with an ms or tms index; its\n"
-       << "      header says which.  Writes one line per read: its name, a tab, and\n"
-       << "      its values, space-separated (QUERY_OUTPUT.md).  A summary goes to\n"
-       << "      stderr.  Results and their order do not depend on the thread count.\n"
+       << "      or one sequence per line; - for stdin).  Writes one line per read:\n"
+       << "      its name, a tab, and its values, space-separated (QUERY_OUTPUT.md).\n"
+       << "      A summary goes to stderr.  Results and their order do not depend on\n"
+       << "      the thread count.\n"
        << "    -o FILE                  write to FILE (default stdout); FILE.gz is gzipped\n"
        << "    -p N, --threads N        query on N threads (default 0: every CPU)\n"
        << "    --gzip-level LEVEL       gzip level for .gz output, 0 to 9 (default 1)\n"
-       << "    --orient fwd|rc|qual     which strand of each read to match: fwd (default)\n"
-       << "                             as given; rc its reverse complement; qual rc only\n"
-       << "                             for reads whose last bases have higher quality\n"
-       << "                             (FASTQ).  rc and qual equal fwd only on an index\n"
-       << "                             holding both strands, as an FMD does.\n"
        << "    --ftab FILE              start reads KLEN steps in from a stored ftab\n"
        << "                             (ftab-build); it must be built from INDEX\n"
        << "    --build-ftab[=KLEN]      build an ftab of KLEN-mers after loading\n"
        << "                             (default KLEN 14)\n"
-       << "  tms index only:\n"
-       << "    --mode psi|phi|dual      how repositions compute LCEs: psi (default)\n"
-       << "                             compares the read with the candidate's suffix\n"
-       << "                             using psi; phi takes whole rows' LCP minima from\n"
-       << "                             the index's LCP summaries and walks phi only over\n"
-       << "                             the current row; dual does as phi, and where the\n"
-       << "                             summaries leave a side open, races a psi walk\n"
-       << "                             against phi's.  psi and dual need psi, phi and\n"
-       << "                             dual need phi.\n"
+       << "    --mode min|psi|phi|dual  how repositions compute LCEs: min reads the LCP\n"
+       << "                             minima of a min index; psi compares the read\n"
+       << "                             with the candidate's suffix using psi; phi takes\n"
+       << "                             whole rows' LCP minima from the index's LCP\n"
+       << "                             summaries and walks phi only over the current\n"
+       << "                             row; dual does as phi, and where the summaries\n"
+       << "                             leave a side open, races a psi walk against\n"
+       << "                             phi's.  min needs a min index, psi a psi or full\n"
+       << "                             index, phi a phi or full index, and dual a full\n"
+       << "                             index.  The default is min on a min index, phi\n"
+       << "                             on a phi index, and psi otherwise.\n"
+       << "  needs a phi or full index:\n"
        << "    --positions              add a field with an occurrence position for each\n"
-       << "                             value (-1 where it is 0); needs phi\n"
+       << "                             value (-1 where it is 0)\n"
        << "    --report ms|smem-one|smem-all\n"
        << "                             ms (default) adds nothing; smem-one adds the\n"
        << "                             read's SMEMs as i:L:p; smem-all writes SMEMs as\n"
@@ -129,7 +126,6 @@ static void usage(std::ostream& os, bool advanced = false) {
        << "    --max-smem-positions MAXPOS\n"
        << "                             smem-all lists at most MAXPOS positions per SMEM\n"
        << "                             (default: all), as ropebwt3's -p\n"
-       << "      --orient rc and qual cannot be used with --positions or an SMEM report.\n"
        << "\n"
        << "Ftabs (FTAB_FORMAT.md):\n"
        << "  ftab-build INDEX FTAB [--kmer-len KLEN | --auto] [-p N]\n"
@@ -150,8 +146,9 @@ static void usage(std::ostream& os, bool advanced = false) {
        << "  index-verify INDEX\n"
        << "      Check every section's CRC-32 and that the file is whole.\n"
        << "  index-add-seq-ids INDEX SEQ_IDS OUT\n"
-       << "      Write the tms index INDEX to OUT with the sequence-ID table SEQ_IDS\n"
-       << "      (see tms-build --seq-ids), copying its other sections unchanged.\n";
+       << "      Write INDEX, a psi, phi or full index, to OUT with the sequence-ID\n"
+       << "      table SEQ_IDS (see build --seq-ids), copying its other sections\n"
+       << "      unchanged.\n";
     if (!advanced) os << "\nRun 'ms2 --help-advanced' for development and advanced options.\n";
 }
 
@@ -160,6 +157,13 @@ static void usage_advanced(std::ostream& os) {
     usage(os, true);
     os << "\n"
        << "Advanced query options:\n"
+       << "    --orient fwd|rc|qual     which strand of each read to match: fwd (default)\n"
+       << "                             as given; rc its reverse complement; qual rc only\n"
+       << "                             for reads whose last bases have higher quality\n"
+       << "                             (FASTQ).  rc and qual equal fwd only on an index\n"
+       << "                             holding both strands, as an FMD does.  rc and\n"
+       << "                             qual cannot be used with --positions or an SMEM\n"
+       << "                             report.\n"
        << "    --interleave DEPTH       keep DEPTH reads in flight per thread, prefetching\n"
        << "                             each one's next row (default 32); 0 queries one\n"
        << "                             read at a time without prefetching\n"
@@ -168,9 +172,9 @@ static void usage_advanced(std::ostream& os) {
        << "                             from the reads seen so far\n"
        << "    --block-bytes BYTES      each thread takes BYTES bytes of input at a time\n"
        << "    --no-output              skip writing results (for timing)\n"
-       << "    --phi-starts             tms: matching statistics without positions load\n"
-       << "                             phi's starts-based form, not its narrower\n"
-       << "                             lengths-based form\n"
+       << "    --phi-starts             on a phi or full index, matching statistics\n"
+       << "                             without positions load phi's starts-based form,\n"
+       << "                             not its narrower lengths-based form\n"
        << "    --count walk|backward|adaptive\n"
        << "                             how smem-all counts an SMEM's occurrences: walk\n"
        << "                             steps phi and phi_inv over all of them; backward\n"
@@ -192,8 +196,7 @@ static void usage_advanced(std::ostream& os) {
        << "                             replay recorded outcomes: oracle moves to the\n"
        << "                             recorded run and length; oracle-scan scans only\n"
        << "                             the recorded side and takes the recorded length.\n"
-       << "                             Output equals the recording mode's.  An ms index's\n"
-       << "                             other mode is standard, its default.\n"
+       << "                             Output equals the recording mode's.\n"
        << "      Results do not depend on DEPTH, READS, BYTES, --phi-starts or --count.\n"
        << "      On a\n"
        << "      machine with several memory nodes, the index is interleaved over them\n"
@@ -203,56 +206,60 @@ static void usage_advanced(std::ostream& os) {
        << "      --orient matched on the other strand.  With smem-all, DEPTH also sets\n"
        << "      how many phi and phi_inv walks list positions at once.\n"
        << "\n"
-       << "Advanced tms query modes:\n"
+       << "Advanced query modes:\n"
        << "    --mode phi-walk          walk phi over every row between the current row\n"
-       << "                             and the candidate; needs phi, not the summaries\n"
+       << "                             and the candidate; needs a phi or full index,\n"
+       << "                             with or without LCP summaries\n"
        << "    --mode phiskip           psi if the match length is below the row distance,\n"
-       << "                             else phi-walk; needs psi and phi\n"
+       << "                             else phi-walk; needs a full index\n"
        << "    --mode dual-walk         psi if the match length is below the row distance,\n"
        << "                             else psi and phi-walk side by side, the first to\n"
-       << "                             finish deciding; needs psi and phi\n"
+       << "                             finish deciding; needs a full index\n"
        << "      Every mode gives the same output.\n"
        << "\n"
-       << "Advanced tms-build options and commands:\n"
-       << "    --no-lcp-summary         build phi without the LCP summaries; the index\n"
-       << "                             serves phi-walk, phiskip and dual-walk, not phi or\n"
-       << "                             dual, and --phi needs no --minima or --lcp-bin\n"
-       << "  tms-add-summary INDEX MINIMA OUT\n"
-       << "      Write the tms index INDEX, built without LCP summaries, to OUT with\n"
-       << "      them, computed for its LF rows from the TeraLCP -ominima file MINIMA\n"
-       << "      of its BWT, copying its other sections unchanged.  OUT equals the\n"
-       << "      index tms-build writes with the summaries.\n"
-       << "\n"
-       << "Advanced build-rlbwt options:\n"
-       << "    --minima-only            keep only the minima of --lcp-bin's LCPs, as a\n"
-       << "                             --minima file does\n"
-       << "    --percentile FRAC        spillover percentile (default 0.98)\n"
-       << "    --coalesce-spillover     coalesce spillover\n"
-       << "    --spill-align ALIGN      spillover alignment\n"
-       << "    --spill-split-bits BITS  spillover split bits\n"
+       << "Advanced build options and commands:\n"
+       << "    --lcp-bin FILE           min, phi and full: LCP input in place of --minima,\n"
+       << "                             one 64-bit LCP per row, optionally after a 64-bit\n"
+       << "                             row count\n"
+       << "    --no-lcp-summary         phi and full: build phi without the LCP summaries;\n"
+       << "                             the index serves phi-walk, phiskip and dual-walk,\n"
+       << "                             not phi or dual, and --phi needs no --minima or\n"
+       << "                             --lcp-bin\n"
+       << "    --minima-only            min: keep only the minima of --lcp-bin's LCPs, as\n"
+       << "                             a --minima file does\n"
+       << "    --percentile FRAC        min: spillover percentile (default 0.98)\n"
+       << "    --coalesce-spillover     min: coalesce spillover\n"
+       << "    --spill-align ALIGN      min: spillover alignment\n"
+       << "    --spill-split-bits BITS  min: spillover split bits\n"
+       << "  index-add-lcp-summary INDEX MINIMA OUT\n"
+       << "      Write INDEX, a phi or full index built without LCP summaries, to OUT\n"
+       << "      with them, computed for its LF rows from the TeraLCP -ominima file\n"
+       << "      MINIMA of its BWT, copying its other sections unchanged.  OUT equals\n"
+       << "      the index build writes with the summaries.\n"
        << "\n"
        << "Development commands:\n"
        << "  pattern INDEX PATTERN\n"
-       << "      Print the matching statistics of PATTERN with the ms index INDEX.\n"
-       << "  tms-text INDEX\n"
+       << "      Print the matching statistics of PATTERN with the min index INDEX.\n"
+       << "  text INDEX\n"
        << "      Print the indexed text, read back with LF; a string collection prints\n"
        << "      each string and its $, one per line, in the BWT order of their\n"
        << "      terminators.  An FMD's N prints as N.\n"
-       << "  tms-inspect INDEX [--phi-lengths]\n"
-       << "      Print a tms index's structures' sizes and column widths.\n"
-       << "      --phi-lengths loads only LF and phi's lengths-based form.\n"
-       << "  inspect INDEX [--spillover-tsv FILE]\n"
-       << "      Inspect an ms index and optionally write its spillover as TSV.\n"
+       << "  inspect INDEX [--spillover-tsv FILE] [--phi-lengths]\n"
+       << "      Print an index's structures' sizes and column widths.  On a min\n"
+       << "      index, --spillover-tsv also writes its spillover as TSV; on a phi or\n"
+       << "      full index, --phi-lengths loads only LF and phi's lengths-based form.\n"
        << "  ftab-survey INDEX [--kmin KLEN] [--kmax KLEN] [--verify KLEN] [-p N]\n"
-       << "      Count the KLEN-mers over ACGT that occur in an ms index's text, for\n"
+       << "      Count the KLEN-mers over ACGT that occur in a min index's text, for\n"
        << "      KLEN from --kmin (default 6) to --kmax (default 15), and the size of\n"
        << "      a dense table of them; --verify checks counts up to its KLEN by brute\n"
        << "      force.\n"
        << "  split-report INDEX [-p N]\n"
        << "      For each move structure, print its split parameters, intervals,\n"
        << "      longest interval, length cap and balance against the bound 2b - 1.\n"
-       << "  test [DATA_DIR]          run the built-in tests (default DATA_DIR ./data)\n"
-       << "  tms-test [DATA_DIR]      run only the tms tests\n"
+       << "  test [DATA_DIR] [--only min|psi-phi-full]\n"
+       << "                           run the built-in tests (default DATA_DIR ./data);\n"
+       << "                           --only runs one suite, of min indexes or of psi,\n"
+       << "                           phi and full indexes\n"
        << "  fmd-test [DATA_DIR]      run only the string-collection (FMD) and large-n tests\n"
        << "  discover [DATA_DIR]      find patterns where index types disagree with base\n"
        << "  investigate DATA_DIR PATTERN [INDEX_TYPE] [TRACE_STEP]\n"
@@ -1126,9 +1133,34 @@ static int run_batch(const QueryOptions& o, std::optional<Index> (*read)(const s
 }
 
 /**
- * query: read the index's header, whose tool field says whether it is an ms
- * or a tms index, then run that kind's engine, refusing options only a tms
- * index serves.
+ * The layout of the index whose header is h: min for an ms index, else
+ * psi, phi or full by the parts it holds.
+ */
+static std::string layout_of(const orbit_idx::Header& h) {
+    return h.tool == orbit_idx::Tool::MS ? "min" : TmsIndex::layout_name(TmsIndex::held_parts(h));
+}
+
+/**
+ * The layouts that hold every part a tms mode reads, as "a psi or full
+ * index", or empty for the oracle modes, which read what the recording
+ * mode read.
+ */
+static std::string mode_needs(TmsMode m) {
+    switch (m) {
+    case TmsMode::PSI: return "a psi or full index";
+    case TmsMode::PHI:
+    case TmsMode::PHI_WALK: return "a phi or full index";
+    case TmsMode::DUAL:
+    case TmsMode::DUAL_WALK:
+    case TmsMode::PHISKIP: return "a full index";
+    default: return "";
+    }
+}
+
+/**
+ * query: read the index's header, whose tool field says whether it is a
+ * min index or holds psi or phi, then run that kind's engine, refusing
+ * options and modes the index's layout does not serve.
  */
 static int run_query(int argc, char** argv) {
     QueryOptions o;
@@ -1140,17 +1172,19 @@ static int run_query(int argc, char** argv) {
         std::cerr << "query: " << e.what() << "\n";
         return 1;
     }
+    const std::string layout = layout_of(h);
     if (h.tool == orbit_idx::Tool::MS) {
         if (!o.tms_only.empty()) {
-            std::cerr << "query: " << o.tms_only[0] << " needs a tms index, and " << o.idx_path << " is an ms index\n";
+            std::cerr << "query: " << o.tms_only[0] << " needs a phi or full index, and " << o.idx_path
+                      << " is a min index\n";
             return 1;
         }
-        if (o.mode.empty() || o.mode == "standard") g_ms_mode = MsMode::STANDARD;
+        if (o.mode.empty() || o.mode == "min") g_ms_mode = MsMode::STANDARD;
         else if (o.mode == "oracle") g_ms_mode = MsMode::ORACLE;
         else if (o.mode == "oracle-scan") g_ms_mode = MsMode::ORACLE_SCAN;
         else if (TmsMode m; tms_mode_of(o.mode, m)) {
-            std::cerr << "query: --mode " << o.mode << " needs a tms index, and " << o.idx_path
-                      << " is an ms index, whose only mode is standard\n";
+            std::cerr << "query: --mode " << o.mode << " needs " << mode_needs(m) << ", and " << o.idx_path
+                      << " is a min index\n";
             return 1;
         } else {
             std::cerr << "Unknown mode: " << o.mode << "\n";
@@ -1158,13 +1192,21 @@ static int run_query(int argc, char** argv) {
         }
         return run_batch<MSIndexSpillLCP<false>>(o, ms_serialize::read_index);
     }
-    if (o.mode == "standard") {
-        std::cerr << "query: --mode standard is for ms indexes; " << o.idx_path
-                  << " is a tms index, whose modes are psi (the default), phi and dual\n";
+    if (o.mode == "min") {
+        std::cerr << "query: --mode min needs a min index, and " << o.idx_path << " is a " << layout << " index\n";
         return 1;
     }
-    if (!o.mode.empty() && !tms_mode_of(o.mode, g_tms_mode)) {
+    // The default mode is psi, or phi on an index without psi.
+    const TmsParts held = TmsIndex::held_parts(h);
+    if (o.mode.empty()) g_tms_mode = held.psi ? TmsMode::PSI : TmsMode::PHI;
+    else if (!tms_mode_of(o.mode, g_tms_mode)) {
         std::cerr << "Unknown mode: " << o.mode << "\n";
+        return 1;
+    }
+    const TmsParts need = tms_query_parts(g_tms_mode, false, TmsReport::MS);
+    if ((need.psi && !held.psi) || (need.phi && !held.phi)) {
+        std::cerr << "query: --mode " << o.mode << " needs " << mode_needs(g_tms_mode) << ", and " << o.idx_path
+                  << " is a " << layout << " index\n";
         return 1;
     }
     // Load only the parts the query reads; the load refuses an index that
@@ -1173,6 +1215,377 @@ static int run_query(int argc, char** argv) {
         const TmsParts need = tms_query_load();
         return read_tms_index(path, &need);
     });
+}
+
+// A build's command line.  The options of every layout are parsed, and
+// those given are kept by name, to refuse the ones its layout does not take.
+struct BuildOptions {
+    std::string heads_path, lens_path, idx_path, layout;
+    std::string minima_path, lcp_bin_path, phi_path, seq_ids_path;
+    std::vector<std::string> given;
+    orbit::split_params lf_split, phi_split;
+    // min: the spillover's settings.
+    double percentile_k = 0.98;
+    bool coalesce = false, minima_only = false;
+    ulint spill_align = 0;
+    uchar spill_split_bits = 0;
+    // psi, phi and full.
+    bool phi_inv = true, no_lcp_summary = false;
+};
+
+/** build --layout min: LF with each row's LCP minima and spillover. */
+static int build_min(const BuildOptions& o) {
+    const std::string &heads_path = o.heads_path, &lens_path = o.lens_path, &idx_path = o.idx_path;
+    const std::string &minima_path = o.minima_path, &lcp_bin_path = o.lcp_bin_path;
+    bool minima_only = o.minima_only;
+    if (minima_path.empty() == lcp_bin_path.empty()) {
+        std::cerr << "build --layout min needs exactly one of --minima and --lcp-bin\n";
+        return 1;
+    }
+    // A minima file holds only the minima, so it is minima-only by nature.
+    if (!minima_path.empty()) minima_only = true;
+    using clock = std::chrono::steady_clock;
+    auto t0 = clock::now();
+    std::vector<uchar> heads;
+    std::vector<ulint> lens;
+    std::string err;
+    if (!rlbwt_io::load_rlbwt(heads_path, lens_path, heads, lens, err)) {
+        std::cerr << "Failed to load RLBWT: " << err << "\n";
+        return 1;
+    }
+    ulint n = 0;
+    for (ulint l : lens) n += l;
+    mem_report::phase("load_rlbwt", heads.size());
+    const size_t runs = heads.size();
+    const double load_s = std::chrono::duration<double>(clock::now() - t0).count();
+    auto t1 = clock::now();
+    ms_build::Options bo;
+    bo.percentile_k = o.percentile_k;
+    bo.coalesce = o.coalesce;
+    bo.spill_align = o.spill_align;
+    bo.spill_split_bits = o.spill_split_bits;
+    bo.minima_only = minima_only;
+    bo.lf_split = o.lf_split;
+    bo.report = true;
+    ms_build::Stats st;
+    std::optional<MSIndexSpillLCP<false>> idx;
+    try {
+        if (!minima_path.empty()) {
+            idx = ms_build::build(std::move(heads), std::move(lens), ms_build::minima_source(minima_path, runs, n),
+                                  bo, &st);
+        } else {
+            // The LCP file is read by run, so its source keeps the run lengths.
+            const std::vector<ulint> run_lens = lens;
+            idx = ms_build::build(std::move(heads), std::move(lens),
+                                  ms_build::lcp_bin_source(lcp_bin_path, run_lens, minima_only), bo, &st);
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Failed to build: " << e.what() << "\n";
+        return 1;
+    }
+    const double build_s = std::chrono::duration<double>(clock::now() - t1).count();
+    idx->set_info(build_info());
+    if (!ms_serialize::write_index(idx_path, *idx)) {
+        std::cerr << "Failed to write index: " << idx_path << "\n";
+        return 1;
+    }
+    mem_report::phase("write", runs);
+    std::cout << "Built min index: " << idx_path << " (runs=" << runs << ", rows=" << idx->move_runs() << ", n=" << n
+              << ", skinny=" << st.skinny << ", jumbo=" << st.jumbo << ", load_s=" << load_s
+              << ", build_s=" << build_s << ")\n";
+    return 0;
+}
+
+/** build --layout psi, phi or full. */
+static int build_layout(const BuildOptions& o) {
+    const std::string &minima_path = o.minima_path, &lcp_bin_path = o.lcp_bin_path, &phi_path = o.phi_path;
+    const std::string &seq_ids_path = o.seq_ids_path, &idx_path = o.idx_path;
+    TmsBuildOptions opts;
+    opts.report = true;
+    opts.lf_split = o.lf_split;
+    opts.phi_split = o.phi_split;
+    opts.phi_inv = o.phi_inv;
+    opts.layout = o.layout == "psi" ? TmsLayout::PSI : o.layout == "phi" ? TmsLayout::PHI : TmsLayout::FULL;
+    // The phi and full layouts hold phi, and the LCP summaries unless told
+    // otherwise.
+    const bool with_phi = opts.layout != TmsLayout::PSI;
+    const bool lcp_summary = with_phi && !o.no_lcp_summary;
+    if (!minima_path.empty() && !lcp_bin_path.empty()) {
+        std::cerr << "give at most one of --minima and --lcp-bin\n";
+        return 1;
+    }
+    if (with_phi && minima_path.empty() && lcp_bin_path.empty() && (lcp_summary || phi_path.empty())) {
+        std::cerr << "build --layout " << o.layout << " needs --minima, a TeraLCP -ominima file, for phi and the LCP\n"
+                  << "summaries --mode phi and dual read (or --phi with --no-lcp-summary, for an index\n"
+                  << "serving --mode phi-walk; see --help-advanced)\n";
+        return 1;
+    }
+    // The sequence-ID table is read first, so that a bad one fails
+    // before the build.
+    std::optional<SeqIdTable> seq_ids;
+    if (!seq_ids_path.empty()) {
+        try {
+            seq_ids = SeqIdTable::read(seq_ids_path);
+        } catch (const std::exception& e) {
+            std::cerr << e.what() << "\n";
+            return 1;
+        }
+    }
+    using clock = std::chrono::steady_clock;
+    auto t0 = clock::now();
+    std::vector<uchar> heads;
+    std::vector<ulint> lens, tops;
+    TmsPhiSamples samples;
+    std::string err;
+    if (!rlbwt_io::load_rlbwt(o.heads_path, o.lens_path, heads, lens, err)) {
+        std::cerr << "Failed to load RLBWT: " << err << "\n";
+        return 1;
+    }
+    if (!phi_path.empty()) {
+        ulint n = 0;
+        for (ulint l : lens) n += l;
+        if (!phi_samples_io::read_phi_samples(phi_path, n, TmsPhiSamples::records_for(heads, lens), samples, err)) {
+            std::cerr << "Failed to load phi samples: " << err << "\n";
+            return 1;
+        }
+    } else if (with_phi && !lcp_bin_path.empty()) {
+        // One little-endian 64-bit LCP per row, optionally after a
+        // 64-bit row count (msbench prep's form); keep each run head's.
+        std::ifstream lin(lcp_bin_path, std::ios::binary | std::ios::ate);
+        if (!lin.good()) { std::cerr << "cannot open " << lcp_bin_path << "\n"; return 1; }
+        ulint n = 0;
+        for (ulint l : lens) n += l;
+        const ulint bytes = static_cast<ulint>(lin.tellg());
+        lin.seekg(0);
+        if (bytes == 8 * (n + 1)) {
+            uint64_t count = 0;
+            lin.read(reinterpret_cast<char*>(&count), 8);
+            if (count != n) { std::cerr << "lcp file count " << count << " is not n = " << n << "\n"; return 1; }
+        } else if (bytes != 8 * n) {
+            std::cerr << "lcp file has " << bytes << " bytes; expected 8 per row for n = " << n << "\n";
+            return 1;
+        }
+        std::vector<uint64_t> buf(1 << 20);
+        size_t have = 0, at = 0;
+        tops.reserve(heads.size());
+        for (ulint len : lens) {
+            for (ulint j = 0; j < len; ++j) {
+                if (at == have) {
+                    lin.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size() * 8));
+                    have = static_cast<size_t>(lin.gcount()) / 8;
+                    at = 0;
+                    if (have == 0) { std::cerr << "lcp file is shorter than the RLBWT\n"; return 1; }
+                }
+                if (j == 0) tops.push_back(buf[at]);
+                ++at;
+            }
+        }
+    } else if (with_phi) {
+        // Only each run's top is kept, so the file is read a run at a time.
+        ulint n = 0;
+        for (ulint l : lens) n += l;
+        rlbwt_io::MinimaReader rd;
+        RunLcpPairs p;
+        bool ok = rd.open(minima_path, heads.size(), n, err);
+        tops.reserve(heads.size());
+        for (size_t i = 0; ok && i < heads.size(); ++i) {
+            ok = rd.next(p, err);
+            if (ok) tops.push_back(p[0].second);
+        }
+        if (!ok || !rd.finish(err)) {
+            std::cerr << "Failed to load minima: " << err << "\n";
+            return 1;
+        }
+    }
+    // The LCP summaries, from two more reads of the LCP input, cut into
+    // the LF rows the index will have.
+    TmsLcpSummary summary;
+    double summary_s = 0;
+    if (lcp_summary) {
+        const auto ts = clock::now();
+        try {
+            const orbit::int_vector rows = TmsIndex::lf_row_lengths(heads, lens, opts);
+            ulint n = 0;
+            for (ulint l : lens) n += l;
+            auto sums = minima_path.empty()
+                            ? ms_build::row_summaries(lens, rows, ms_build::lcp_bin_source(lcp_bin_path, lens, true))
+                            : ms_build::row_summaries(lens, rows, ms_build::minima_source(minima_path, heads.size(), n));
+            summary.top = std::move(sums.first);
+            summary.int_min = std::move(sums.second);
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to build LCP summaries: " << e.what() << "\n";
+            return 1;
+        }
+        opts.lcp_summary = &summary;
+        summary_s = std::chrono::duration<double>(clock::now() - ts).count();
+        mem_report::phase("lcp_summary", heads.size());
+    }
+    // The run lengths and tops, packed.
+    orbit::int_vector run_lens, run_tops;
+    {
+        ulint max_top = 0;
+        for (ulint t : tops) max_top = std::max(max_top, t);
+        run_tops = orbit::int_vector(tops.size(), orbit::bit_width(max_top));
+        for (size_t i = 0; i < tops.size(); ++i) run_tops.set(i, tops[i]);
+        std::vector<ulint>().swap(tops);
+    }
+    {
+        ulint max_len = 0;
+        for (ulint l : lens) max_len = std::max(max_len, l);
+        run_lens = orbit::int_vector(lens.size(), orbit::bit_width(max_len));
+        for (size_t i = 0; i < lens.size(); ++i) run_lens.set(i, lens[i]);
+        std::vector<ulint>().swap(lens);
+    }
+    const double load_s = std::chrono::duration<double>(clock::now() - t0).count();
+    mem_report::phase("load", heads.size());
+    auto t1 = clock::now();
+    TmsIndex idx = phi_path.empty() ? TmsIndex(heads, run_lens, opts, with_phi ? &run_tops : nullptr)
+                                    : TmsIndex(heads, run_lens, opts, std::move(samples));
+    const double build_s = std::chrono::duration<double>(clock::now() - t1).count();
+    if (seq_ids) {
+        try {
+            idx.set_seq_ids(std::move(*seq_ids));
+        } catch (const std::exception& e) {
+            std::cerr << seq_ids_path << " does not describe the indexed text: " << e.what() << "\n";
+            return 1;
+        }
+    }
+    idx.set_info(build_info());
+    std::ofstream out(idx_path, std::ios::binary);
+    size_t bytes = 0;
+    try {
+        if (out.good()) bytes = idx.serialize(out);
+    } catch (const std::exception& e) {
+        std::cerr << e.what() << "\n";
+        out.setstate(std::ios::failbit);
+    }
+    if (!out.good()) {
+        std::cerr << "Failed to write index: " << idx_path << "\n";
+        return 1;
+    }
+    mem_report::phase("write", heads.size());
+    idx.describe(std::cout);
+    std::cout << "Built " << o.layout << " index: " << idx_path << " (runs=" << heads.size() << ", bytes=" << bytes
+              << ", load_s=" << load_s << ", build_s=" << build_s;
+    if (lcp_summary) std::cout << ", lcp_summary_s=" << summary_s << " (in load_s)";
+    std::cout << ")\n";
+    return 0;
+}
+
+/**
+ * build: parse the options of every layout, refuse those the chosen layout
+ * does not take, and build it.
+ */
+static int run_build(int argc, char** argv) {
+    if (argc < 3) {
+        std::cerr << "build requires HEADS, LENS and INDEX\n";
+        return 1;
+    }
+    BuildOptions o;
+    o.heads_path = argv[0];
+    o.lens_path = argv[1];
+    o.idx_path = argv[2];
+    std::string v;
+    for (int i = 3; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (opt_value(argc, argv, i, "--layout", v)) o.layout = v;
+        else if (opt_value(argc, argv, i, "--minima", v)) o.minima_path = v;
+        else if (opt_value(argc, argv, i, "--lcp-bin", v)) o.lcp_bin_path = v;
+        else if (opt_value(argc, argv, i, "--phi", v)) o.phi_path = v;
+        else if (opt_value(argc, argv, i, "--seq-ids", v)) o.seq_ids_path = v;
+        else if (opt_value(argc, argv, i, "--lf-split", v)) {
+            if (!lf_split_arg(v, o.lf_split)) return 1;
+        }
+        else if (opt_value(argc, argv, i, "--phi-split", v)) o.phi_split = split_arg("--phi-split", v);
+        else if (arg == "--no-phi-inv") o.phi_inv = false;
+        else if (arg == "--no-lcp-summary") o.no_lcp_summary = true;
+        else if (arg == "--minima-only") o.minima_only = true;
+        else if (opt_value(argc, argv, i, "--percentile", v)) o.percentile_k = std::stod(v);
+        else if (arg == "--coalesce-spillover") o.coalesce = true;
+        else if (opt_value(argc, argv, i, "--spill-align", v)) o.spill_align = opt_uint("--spill-align", v);
+        else if (opt_value(argc, argv, i, "--spill-split-bits", v))
+            o.spill_split_bits = static_cast<uchar>(opt_uint("--spill-split-bits", v));
+        else { std::cerr << "Unknown build option: " << arg << " (see ms2 --help)\n"; return 1; }
+        const std::string name = arg.substr(0, arg.find('='));
+        if (name != "--layout") o.given.push_back(name);
+    }
+    // The options each layout takes.
+    static const std::vector<std::string> phi_takes = {"--minima",   "--lcp-bin",    "--phi",
+                                                        "--seq-ids",  "--lf-split",   "--phi-split",
+                                                        "--no-phi-inv", "--no-lcp-summary"};
+    static const std::map<std::string, std::vector<std::string>> takes = {
+        {"min",
+         {"--minima", "--lcp-bin", "--lf-split", "--minima-only", "--percentile", "--coalesce-spillover",
+          "--spill-align", "--spill-split-bits"}},
+        {"psi", {"--seq-ids", "--lf-split"}},
+        {"phi", phi_takes},
+        {"full", phi_takes}};
+    if (o.layout.empty()) {
+        std::cerr << "build needs --layout min, psi, phi or full (see ms2 --help)\n";
+        return 1;
+    }
+    const auto it = takes.find(o.layout);
+    if (it == takes.end()) {
+        std::cerr << "Unknown layout: " << o.layout << " (expected min, psi, phi or full)\n";
+        return 1;
+    }
+    for (const std::string& g : o.given)
+        if (std::find(it->second.begin(), it->second.end(), g) == it->second.end()) {
+            std::cerr << "build --layout " << o.layout << " takes no " << g << "\n";
+            return 1;
+        }
+    return o.layout == "min" ? build_min(o) : build_layout(o);
+}
+
+/**
+ * text: print the text an index holds, read back with LF, which step
+ * takes one step of.
+ */
+template <typename Index, typename Step>
+static int print_text(Index& idx, Step step) {
+    auto show = [](uchar c) {
+        return c == orbit::TERMINATOR ? '$' : c == orbit::SEPARATOR ? '%' : c == ms_alpha::TEXT_N ? 'N'
+                                                                                 : static_cast<char>(c);
+    };
+    const ulint n = idx.domain();
+    ulint m = 0;
+    for (ulint i = 0; i < idx.move_runs(); ++i)
+        if (idx.get_character(i) == orbit::TERMINATOR) m += idx.get_length(i);
+    if (m <= 1) {
+        // One text, so LF is one cycle.  Row 0 holds text position
+        // n - 1, so the s-th row LF visits from it has BWT character
+        // T[n - 2 - s].
+        std::string t(n, '\0');
+        auto pos = idx.first();
+        for (ulint st = 0; st < n; ++st) {
+            t[(2 * n - 2 - st) % n] = show(idx.get_character(pos.interval));
+            pos = step(pos);
+        }
+        std::cout << t << "\n";
+        return 0;
+    }
+    // A string collection, with one terminator per string, whose LF may
+    // have several cycles.  The k-th of the first m rows is the suffix
+    // that is only some string's terminator, so LF from it reads that
+    // string backward, up to the row whose BWT character is a terminator.
+    std::string t, line;
+    auto row = idx.first();
+    for (ulint k = 0; k < m; ++k) {
+        if (k > 0) {
+            if (row.offset + 1 < idx.get_length(row.interval)) ++row.offset;
+            else row = idx.down(row);  // the next interval's first row
+        }
+        t.clear();
+        for (auto pos = row;;) {
+            const uchar c = idx.get_character(pos.interval);
+            if (c == orbit::TERMINATOR) break;
+            t.push_back(show(c));
+            pos = step(pos);
+        }
+        line.assign(t.rbegin(), t.rend());
+        std::cout << line << "$\n";
+    }
+    return 0;
 }
 
 /** Run the command named by argv[1]. */
@@ -1196,18 +1609,26 @@ static int run_command(int argc, char** argv) {
 
 #ifdef NDEBUG
     // The test suites check their results with assert.
-    if (cmd == "test" || cmd == "tms-test" || cmd == "fmd-test") {
+    if (cmd == "test" || cmd == "fmd-test") {
         std::cerr << cmd << " needs assertions; build with make (not make bench)\n";
         return 1;
     }
 #endif
 
     if (cmd == "test") {
-        std::string data_dir = (argc > 0 && argv[0][0] != '-') ? argv[0] : "./data";
-        const bool ms_ok = ms_test::run_all_tests(data_dir);
-        std::cout << std::endl;
-        const bool tms_ok = tms_test::run_all_tests(data_dir);
-        return (ms_ok && tms_ok) ? 0 : 1;
+        const int first = (argc > 0 && argv[0][0] != '-') ? 1 : 0;
+        const std::string data_dir = first ? argv[0] : "./data";
+        // --only runs one suite: min, of min indexes, or psi-phi-full.
+        std::string only, v;
+        for (int i = first; i < argc; ++i) {
+            if (!opt_value(argc, argv, i, "--only", v)) { std::cerr << "Unknown test option: " << argv[i] << "\n"; return 1; }
+            if (v != "min" && v != "psi-phi-full") { std::cerr << "--only takes min or psi-phi-full, not " << v << "\n"; return 1; }
+            only = v;
+        }
+        const bool min_ok = only == "psi-phi-full" || ms_test::run_all_tests(data_dir);
+        if (only.empty()) std::cout << std::endl;
+        const bool layouts_ok = only == "min" || tms_test::run_all_tests(data_dir);
+        return (min_ok && layouts_ok) ? 0 : 1;
     }
 
     if (cmd == "discover") {
@@ -1271,293 +1692,9 @@ static int run_command(int argc, char** argv) {
         return 0;
     }
 
-    if (cmd == "build-rlbwt") {
-        if (argc < 3) {
-            std::cerr << "build-rlbwt requires HEADS, LENS and INDEX\n";
-            return 1;
-        }
-        const std::string heads_path = argv[0], lens_path = argv[1], idx_path = argv[2];
-        std::string minima_path, lcp_bin_path;
-        double percentile_k = 0.98;
-        bool coalesce = false, minima_only = false;
-        ulint spill_align = 0;
-        uchar spill_split_bits = 0;
-        orbit::split_params lf_split;
-        std::string v;
-        for (int i = 3; i < argc; ++i) {
-            if (opt_value(argc, argv, i, "--minima", v)) minima_path = v;
-            else if (opt_value(argc, argv, i, "--lcp-bin", v)) lcp_bin_path = v;
-            else if (strcmp(argv[i], "--minima-only") == 0) minima_only = true;
-            else if (opt_value(argc, argv, i, "--percentile", v)) percentile_k = std::stod(v);
-            else if (strcmp(argv[i], "--coalesce-spillover") == 0) coalesce = true;
-            else if (opt_value(argc, argv, i, "--spill-align", v)) spill_align = opt_uint("--spill-align", v);
-            else if (opt_value(argc, argv, i, "--spill-split-bits", v))
-                spill_split_bits = static_cast<uchar>(opt_uint("--spill-split-bits", v));
-            else if (opt_value(argc, argv, i, "--lf-split", v)) {
-                if (!lf_split_arg(v, lf_split)) return 1;
-            }
-            else { std::cerr << "Unknown build-rlbwt option: " << argv[i] << "\n"; return 1; }
-        }
-        if (minima_path.empty() == lcp_bin_path.empty()) {
-            std::cerr << "build-rlbwt needs exactly one of --minima and --lcp-bin\n";
-            return 1;
-        }
-        // A minima file holds only the minima, so it is minima-only by nature.
-        if (!minima_path.empty()) minima_only = true;
-        using clock = std::chrono::steady_clock;
-        auto t0 = clock::now();
-        std::vector<uchar> heads;
-        std::vector<ulint> lens;
-        std::string err;
-        if (!rlbwt_io::load_rlbwt(heads_path, lens_path, heads, lens, err)) {
-            std::cerr << "Failed to load RLBWT: " << err << "\n";
-            return 1;
-        }
-        ulint n = 0;
-        for (ulint l : lens) n += l;
-        mem_report::phase("load_rlbwt", heads.size());
-        const size_t runs = heads.size();
-        const double load_s = std::chrono::duration<double>(clock::now() - t0).count();
-        auto t1 = clock::now();
-        ms_build::Options bo;
-        bo.percentile_k = percentile_k;
-        bo.coalesce = coalesce;
-        bo.spill_align = spill_align;
-        bo.spill_split_bits = spill_split_bits;
-        bo.minima_only = minima_only;
-        bo.lf_split = lf_split;
-        bo.report = true;
-        ms_build::Stats st;
-        std::optional<MSIndexSpillLCP<false>> idx;
-        try {
-            if (!minima_path.empty()) {
-                idx = ms_build::build(std::move(heads), std::move(lens), ms_build::minima_source(minima_path, runs, n),
-                                      bo, &st);
-            } else {
-                // The LCP file is read by run, so its source keeps the run lengths.
-                const std::vector<ulint> run_lens = lens;
-                idx = ms_build::build(std::move(heads), std::move(lens),
-                                      ms_build::lcp_bin_source(lcp_bin_path, run_lens, minima_only), bo, &st);
-            }
-        } catch (const std::exception& e) {
-            std::cerr << "Failed to build: " << e.what() << "\n";
-            return 1;
-        }
-        const double build_s = std::chrono::duration<double>(clock::now() - t1).count();
-        idx->set_info(build_info());
-        if (!ms_serialize::write_index(idx_path, *idx)) {
-            std::cerr << "Failed to write index: " << idx_path << "\n";
-            return 1;
-        }
-        mem_report::phase("write", runs);
-        std::cout << "Built index: " << idx_path << " (runs=" << runs << ", rows=" << idx->move_runs() << ", n=" << n
-                  << ", skinny=" << st.skinny << ", jumbo=" << st.jumbo << ", load_s=" << load_s
-                  << ", build_s=" << build_s << ")\n";
-        return 0;
-    }
+    if (cmd == "build") return run_build(argc, argv);
 
     if (cmd == "query") return run_query(argc, argv);
-
-    if (cmd == "tms-build") {
-        const int npos = 3;
-        if (argc < npos) {
-            std::cerr << "tms-build requires HEADS, LENS and INDEX\n";
-            return 1;
-        }
-        TmsBuildOptions opts;
-        opts.report = true;
-        bool with_phi = false, no_lcp_summary = false;
-        std::string minima_path, lcp_bin_path, phi_path, seq_ids_path, v;
-        for (int i = npos; i < argc; ++i) {
-            if (opt_value(argc, argv, i, "--lf-split", v)) {
-                if (!lf_split_arg(v, opts.lf_split)) return 1;
-            }
-            else if (opt_value(argc, argv, i, "--phi-split", v)) opts.phi_split = split_arg("--phi-split", v);
-            else if (strcmp(argv[i], "--no-phi-inv") == 0) opts.phi_inv = false;
-            else if (opt_value(argc, argv, i, "--layout", v)) {
-                if (v == "full") opts.layout = TmsLayout::FULL;
-                else if (v == "psi") opts.layout = TmsLayout::PSI;
-                else if (v == "phi") opts.layout = TmsLayout::PHI;
-                else { std::cerr << "Unknown layout: " << v << " (expected full, psi or phi)\n"; return 1; }
-            }
-            else if (opt_value(argc, argv, i, "--minima", v)) { minima_path = v; with_phi = true; }
-            else if (opt_value(argc, argv, i, "--lcp-bin", v)) { lcp_bin_path = v; with_phi = true; }
-            else if (opt_value(argc, argv, i, "--phi", v)) { phi_path = v; with_phi = true; }
-            else if (strcmp(argv[i], "--no-lcp-summary") == 0) no_lcp_summary = true;
-            else if (opt_value(argc, argv, i, "--seq-ids", v)) seq_ids_path = v;
-            else { std::cerr << "Unknown " << cmd << " option: " << argv[i] << "\n"; return 1; }
-        }
-        // Every index with phi gets the LCP summaries unless told otherwise.
-        const bool lcp_summary = with_phi && !no_lcp_summary;
-        if (!minima_path.empty() && !lcp_bin_path.empty()) {
-            std::cerr << "give at most one of --minima and --lcp-bin\n";
-            return 1;
-        }
-        if (lcp_summary && minima_path.empty() && lcp_bin_path.empty()) {
-            std::cerr << "--phi needs --minima or --lcp-bin for the LCP summaries --mode phi and dual read\n"
-                      << "(or --no-lcp-summary, for an index serving --mode phi-walk; see --help-advanced)\n";
-            return 1;
-        }
-        if (opts.layout == TmsLayout::PSI && with_phi) {
-            std::cerr << "--layout psi takes no LCP input (--phi, --minima or --lcp-bin)\n";
-            return 1;
-        }
-        if (opts.layout == TmsLayout::PHI && !with_phi) {
-            std::cerr << "--layout phi needs LCP input (--phi, --minima or --lcp-bin)\n";
-            return 1;
-        }
-        // The sequence-ID table is read first, so that a bad one fails
-        // before the build.
-        std::optional<SeqIdTable> seq_ids;
-        if (!seq_ids_path.empty()) {
-            try {
-                seq_ids = SeqIdTable::read(seq_ids_path);
-            } catch (const std::exception& e) {
-                std::cerr << e.what() << "\n";
-                return 1;
-            }
-        }
-        using clock = std::chrono::steady_clock;
-        auto t0 = clock::now();
-        std::vector<uchar> heads;
-        std::vector<ulint> lens, tops;
-        TmsPhiSamples samples;
-        std::string err;
-        if (!rlbwt_io::load_rlbwt(argv[0], argv[1], heads, lens, err)) {
-            std::cerr << "Failed to load RLBWT: " << err << "\n";
-            return 1;
-        }
-        if (!phi_path.empty()) {
-            ulint n = 0;
-            for (ulint l : lens) n += l;
-            if (!phi_samples_io::read_phi_samples(phi_path, n, TmsPhiSamples::records_for(heads, lens), samples, err)) {
-                std::cerr << "Failed to load phi samples: " << err << "\n";
-                return 1;
-            }
-        } else if (with_phi && !lcp_bin_path.empty()) {
-            // One little-endian 64-bit LCP per row, optionally after a
-            // 64-bit row count (msbench prep's form); keep each run head's.
-            std::ifstream lin(lcp_bin_path, std::ios::binary | std::ios::ate);
-            if (!lin.good()) { std::cerr << "cannot open " << lcp_bin_path << "\n"; return 1; }
-            ulint n = 0;
-            for (ulint l : lens) n += l;
-            const ulint bytes = static_cast<ulint>(lin.tellg());
-            lin.seekg(0);
-            if (bytes == 8 * (n + 1)) {
-                uint64_t count = 0;
-                lin.read(reinterpret_cast<char*>(&count), 8);
-                if (count != n) { std::cerr << "lcp file count " << count << " is not n = " << n << "\n"; return 1; }
-            } else if (bytes != 8 * n) {
-                std::cerr << "lcp file has " << bytes << " bytes; expected 8 per row for n = " << n << "\n";
-                return 1;
-            }
-            std::vector<uint64_t> buf(1 << 20);
-            size_t have = 0, at = 0;
-            tops.reserve(heads.size());
-            for (ulint len : lens) {
-                for (ulint j = 0; j < len; ++j) {
-                    if (at == have) {
-                        lin.read(reinterpret_cast<char*>(buf.data()), static_cast<std::streamsize>(buf.size() * 8));
-                        have = static_cast<size_t>(lin.gcount()) / 8;
-                        at = 0;
-                        if (have == 0) { std::cerr << "lcp file is shorter than the RLBWT\n"; return 1; }
-                    }
-                    if (j == 0) tops.push_back(buf[at]);
-                    ++at;
-                }
-            }
-        } else if (with_phi) {
-            // Only each run's top is kept, so the file is read a run at a time.
-            ulint n = 0;
-            for (ulint l : lens) n += l;
-            rlbwt_io::MinimaReader rd;
-            RunLcpPairs p;
-            bool ok = rd.open(minima_path, heads.size(), n, err);
-            tops.reserve(heads.size());
-            for (size_t i = 0; ok && i < heads.size(); ++i) {
-                ok = rd.next(p, err);
-                if (ok) tops.push_back(p[0].second);
-            }
-            if (!ok || !rd.finish(err)) {
-                std::cerr << "Failed to load minima: " << err << "\n";
-                return 1;
-            }
-        }
-        // The LCP summaries, from two more reads of the LCP input, cut into
-        // the LF rows the index will have.
-        TmsLcpSummary summary;
-        double summary_s = 0;
-        if (lcp_summary) {
-            const auto ts = clock::now();
-            try {
-                const orbit::int_vector rows = TmsIndex::lf_row_lengths(heads, lens, opts);
-                ulint n = 0;
-                for (ulint l : lens) n += l;
-                auto sums = minima_path.empty()
-                                ? ms_build::row_summaries(lens, rows, ms_build::lcp_bin_source(lcp_bin_path, lens, true))
-                                : ms_build::row_summaries(lens, rows, ms_build::minima_source(minima_path, heads.size(), n));
-                summary.top = std::move(sums.first);
-                summary.int_min = std::move(sums.second);
-            } catch (const std::exception& e) {
-                std::cerr << "Failed to build LCP summaries: " << e.what() << "\n";
-                return 1;
-            }
-            opts.lcp_summary = &summary;
-            summary_s = std::chrono::duration<double>(clock::now() - ts).count();
-            mem_report::phase("tms_lcp_summary", heads.size());
-        }
-        // The run lengths and tops, packed.
-        orbit::int_vector run_lens, run_tops;
-        {
-            ulint max_top = 0;
-            for (ulint t : tops) max_top = std::max(max_top, t);
-            run_tops = orbit::int_vector(tops.size(), orbit::bit_width(max_top));
-            for (size_t i = 0; i < tops.size(); ++i) run_tops.set(i, tops[i]);
-            std::vector<ulint>().swap(tops);
-        }
-        {
-            ulint max_len = 0;
-            for (ulint l : lens) max_len = std::max(max_len, l);
-            run_lens = orbit::int_vector(lens.size(), orbit::bit_width(max_len));
-            for (size_t i = 0; i < lens.size(); ++i) run_lens.set(i, lens[i]);
-            std::vector<ulint>().swap(lens);
-        }
-        const double load_s = std::chrono::duration<double>(clock::now() - t0).count();
-        mem_report::phase("tms_load", heads.size());
-        auto t1 = clock::now();
-        TmsIndex idx = phi_path.empty() ? TmsIndex(heads, run_lens, opts, with_phi ? &run_tops : nullptr)
-                                        : TmsIndex(heads, run_lens, opts, std::move(samples));
-        const double build_s = std::chrono::duration<double>(clock::now() - t1).count();
-        const std::string idx_path = argv[npos - 1];
-        if (seq_ids) {
-            try {
-                idx.set_seq_ids(std::move(*seq_ids));
-            } catch (const std::exception& e) {
-                std::cerr << seq_ids_path << " does not describe the indexed text: " << e.what() << "\n";
-                return 1;
-            }
-        }
-        idx.set_info(build_info());
-        std::ofstream out(idx_path, std::ios::binary);
-        size_t bytes = 0;
-        try {
-            if (out.good()) bytes = idx.serialize(out);
-        } catch (const std::exception& e) {
-            std::cerr << e.what() << "\n";
-            out.setstate(std::ios::failbit);
-        }
-        if (!out.good()) {
-            std::cerr << "Failed to write index: " << idx_path << "\n";
-            return 1;
-        }
-        mem_report::phase("tms_write", heads.size());
-        idx.describe(std::cout);
-        std::cout << "Built tms index: " << idx_path << " (runs=" << heads.size() << ", bytes=" << bytes
-                  << ", load_s=" << load_s << ", build_s=" << build_s;
-        if (lcp_summary) std::cout << ", lcp_summary_s=" << summary_s << " (in load_s)";
-        std::cout << ")\n";
-        return 0;
-    }
 
     if (cmd == "ftab-build") {
         if (argc < 2) { std::cerr << "ftab-build requires INDEX and FTAB\n"; return 1; }
@@ -1733,7 +1870,10 @@ static int run_command(int argc, char** argv) {
             if (q == 0) { std::cerr << "Unknown index-plan option: " << argv[i] << "\n"; return 1; }
             query = true;
         }
-        if (query && h.tool != orbit_idx::Tool::TMS) { std::cerr << "query options apply to tms indexes only\n"; return 1; }
+        if (query && h.tool != orbit_idx::Tool::TMS) {
+            std::cerr << "query options apply to psi, phi and full indexes only, and " << argv[0] << " is a min index\n";
+            return 1;
+        }
         orbit_idx::describe_header(h, std::cout);
         auto mb = [](size_t bytes) {
             std::ostringstream os;
@@ -1743,7 +1883,7 @@ static int run_command(int argc, char** argv) {
         if (h.tool != orbit_idx::Tool::TMS) {
             size_t total = 0;
             for (const auto& e : h.sections) total += e.bytes;
-            std::cout << "load plan of this build: every ms query loads every section = " << mb(total) << "\n";
+            std::cout << "load plan of this build: every query on a min index loads every section = " << mb(total) << "\n";
             return 0;
         }
         // What this build loads for each tms query, from the
@@ -1822,13 +1962,14 @@ static int run_command(int argc, char** argv) {
         return 0;
     }
 
-    if (cmd == "tms-add-summary") {
-        if (argc < 3) { std::cerr << "tms-add-summary requires INDEX, MINIMA and OUT\n"; return 1; }
+    if (cmd == "index-add-lcp-summary") {
+        if (argc < 3) { std::cerr << "index-add-lcp-summary requires INDEX, MINIMA and OUT\n"; return 1; }
         try {
             using clock = std::chrono::steady_clock;
             const auto t0 = clock::now();
             const orbit_idx::Header h = orbit_idx::read_header_file(argv[0]);
-            if (h.tool != orbit_idx::Tool::TMS) throw std::runtime_error(std::string(argv[0]) + " is not a tms index");
+            if (h.tool != orbit_idx::Tool::TMS || !TmsIndex::held_parts(h).phi)
+                throw std::runtime_error(std::string(argv[0]) + " is a " + layout_of(h) + " index, not a phi or full index");
             // LF alone; the other sections are copied as they are.
             TmsIndex idx;
             {
@@ -1837,7 +1978,7 @@ static int run_command(int argc, char** argv) {
                 idx.load(in, TmsParts{});
             }
             const double load_s = std::chrono::duration<double>(clock::now() - t0).count();
-            mem_report::phase("tms_add_summary_load", idx.move_runs());
+            mem_report::phase("add_lcp_summary_load", idx.move_runs());
             const auto t1 = clock::now();
             const orbit::int_vector rows = idx.row_lengths();
             const orbit::int_vector lens = idx.run_lengths();
@@ -1845,7 +1986,7 @@ static int run_command(int argc, char** argv) {
             const TmsLcpSummary summary{std::move(sums.first), std::move(sums.second)};
             idx.set_lcp_summary(summary);
             const double summary_s = std::chrono::duration<double>(clock::now() - t1).count();
-            mem_report::phase("tms_add_summary_compute", idx.move_runs());
+            mem_report::phase("add_lcp_summary_compute", idx.move_runs());
             std::string info = "lcp_summary_from=" + std::string(argv[1]) + "\n" + build_info();
             info.replace(info.find("built_by="), 9, "lcp_summary_added_by=");
             info.replace(info.find("built_at="), 9, "lcp_summary_added_at=");
@@ -1858,7 +1999,7 @@ static int run_command(int argc, char** argv) {
                       << int(summary.top.get_widths()[0]) << ", load_s=" << load_s << ", summary_s=" << summary_s
                       << ", write_s=" << write_s << ")\n";
         } catch (const std::exception& e) {
-            std::cerr << "tms-add-summary: " << e.what() << "\n";
+            std::cerr << "index-add-lcp-summary: " << e.what() << "\n";
             return 1;
         }
         return 0;
@@ -1868,7 +2009,8 @@ static int run_command(int argc, char** argv) {
         if (argc < 3) { std::cerr << "index-add-seq-ids requires INDEX, SEQ_IDS and OUT\n"; return 1; }
         try {
             const orbit_idx::Header h = orbit_idx::read_header_file(argv[0]);
-            if (h.tool != orbit_idx::Tool::TMS) throw std::runtime_error(std::string(argv[0]) + " is not a tms index");
+            if (h.tool != orbit_idx::Tool::TMS)
+                throw std::runtime_error(std::string(argv[0]) + " is a min index, not a psi, phi or full index");
             const SeqIdTable t = SeqIdTable::read(argv[1]);
             // The header gives the text length but not the string count,
             // which would take loading LF.
@@ -1902,67 +2044,25 @@ static int run_command(int argc, char** argv) {
         return split_report::run(argv[0], resolve_thread_count(threads), std::cout);
     }
 
-    if (cmd == "tms-inspect") {
-        if (argc < 1) { std::cerr << "tms-inspect requires INDEX\n"; return 1; }
-        // --phi-lengths loads LF and phi's lengths-based form alone, which
-        // takes far less memory than a whole phi or full index.
-        const TmsParts lf_phi_len{false, true, false, false};
-        const bool phi_len_only = argc > 1 && strcmp(argv[1], "--phi-lengths") == 0;
-        auto opt = read_tms_index(argv[0], phi_len_only ? &lf_phi_len : nullptr);
-        if (!opt) { std::cerr << "Failed to load index: " << argv[0] << "\n"; return 1; }
-        opt->describe(std::cout);
-        return 0;
-    }
-
-    if (cmd == "tms-text") {
-        if (argc < 1) { std::cerr << "tms-text requires INDEX\n"; return 1; }
+    if (cmd == "text") {
+        if (argc < 1) { std::cerr << "text requires INDEX\n"; return 1; }
+        orbit_idx::Header h;
+        try {
+            h = orbit_idx::read_header_file(argv[0]);
+        } catch (const std::exception& e) {
+            std::cerr << e.what() << "\n";
+            return 1;
+        }
+        if (h.tool == orbit_idx::Tool::MS) {
+            auto opt = ms_serialize::read_index(argv[0]);
+            if (!opt) { std::cerr << "Failed to load index: " << argv[0] << "\n"; return 1; }
+            return print_text(*opt, [&](auto p) { return opt->LF(p); });
+        }
         // LF alone reads the text back.
         const TmsParts lf_only;
         auto opt = read_tms_index(argv[0], &lf_only);
         if (!opt) { std::cerr << "Failed to load index: " << argv[0] << "\n"; return 1; }
-        auto show = [](uchar c) {
-            return c == orbit::TERMINATOR ? '$' : c == orbit::SEPARATOR ? '%' : c == ms_alpha::TEXT_N ? 'N'
-                                                                                     : static_cast<char>(c);
-        };
-        const ulint n = opt->domain();
-        ulint m = 0;
-        for (ulint i = 0; i < opt->move_runs(); ++i)
-            if (opt->get_character(i) == orbit::TERMINATOR) m += opt->get_length(i);
-        if (m <= 1) {
-            // One text, so LF is one cycle.  Row 0 holds text position
-            // n - 1, so the s-th row LF visits from it has BWT character
-            // T[n - 2 - s].
-            std::string t(n, '\0');
-            auto pos = opt->first();
-            for (ulint st = 0; st < n; ++st) {
-                t[(2 * n - 2 - st) % n] = show(opt->get_character(pos.interval));
-                pos = opt->LF_step(pos);
-            }
-            std::cout << t << "\n";
-            return 0;
-        }
-        // A string collection, with one terminator per string, whose LF may
-        // have several cycles.  The k-th of the first m rows is the suffix
-        // that is only some string's terminator, so LF from it reads that
-        // string backward, up to the row whose BWT character is a terminator.
-        std::string t, line;
-        auto row = opt->first();
-        for (ulint k = 0; k < m; ++k) {
-            if (k > 0) {
-                if (row.offset + 1 < opt->get_length(row.interval)) ++row.offset;
-                else row = opt->down(row);  // the next interval's first row
-            }
-            t.clear();
-            for (auto pos = row;;) {
-                const uchar c = opt->get_character(pos.interval);
-                if (c == orbit::TERMINATOR) break;
-                t.push_back(show(c));
-                pos = opt->LF_step(pos);
-            }
-            line.assign(t.rbegin(), t.rend());
-            std::cout << line << "$\n";
-        }
-        return 0;
+        return print_text(*opt, [&](auto p) { return opt->LF_step(p); });
     }
 
     if (cmd == "fmd-test") {
@@ -1970,15 +2070,40 @@ static int run_command(int argc, char** argv) {
         return fmd_test::run_all_tests(data_dir) ? 0 : 1;
     }
 
-    if (cmd == "tms-test") {
-        std::string data_dir = (argc > 0 && argv[0][0] != '-') ? argv[0] : "./data";
-        return tms_test::run_all_tests(data_dir) ? 0 : 1;
-    }
-
     if (cmd == "inspect") {
         if (argc < 1) {
             std::cerr << "inspect requires INDEX\n";
             return 1;
+        }
+        orbit_idx::Header h;
+        try {
+            h = orbit_idx::read_header_file(argv[0]);
+        } catch (const std::exception& e) {
+            std::cerr << e.what() << "\n";
+            return 1;
+        }
+        const bool min_index = h.tool == orbit_idx::Tool::MS;
+        std::string spill_tsv;
+        bool phi_len_only = false;
+        for (int i = 1; i < argc; ++i) {
+            const std::string arg = argv[i];
+            bool applies = false;
+            if (opt_value(argc, argv, i, "--spillover-tsv", spill_tsv)) applies = min_index;
+            else if (arg == "--phi-lengths") applies = phi_len_only = !min_index;
+            else { std::cerr << "Unknown inspect option: " << arg << "\n"; return 1; }
+            if (!applies) {
+                std::cerr << "inspect takes no " << arg.substr(0, arg.find('=')) << " on a " << layout_of(h) << " index\n";
+                return 1;
+            }
+        }
+        if (!min_index) {
+            // --phi-lengths loads LF and phi's lengths-based form alone, which
+            // takes far less memory than a whole phi or full index.
+            const TmsParts lf_phi_len{false, true, false, false};
+            auto opt = read_tms_index(argv[0], phi_len_only ? &lf_phi_len : nullptr);
+            if (!opt) { std::cerr << "Failed to load index: " << argv[0] << "\n"; return 1; }
+            opt->describe(std::cout);
+            return 0;
         }
         auto opt = ms_serialize::read_index(argv[0]);
         if (!opt) {
@@ -1986,12 +2111,8 @@ static int run_command(int argc, char** argv) {
             return 1;
         }
         ms_inspect::run_inspect(*opt);
-        for (int i = 1; i < argc; ++i) {
-            if (std::string path; opt_value(argc, argv, i, "--spillover-tsv", path)) {
-                if (ms_inspect::run_spillover_tsv(*opt, path))
-                    std::cout << "Spillover TSV written to " << path << "\n";
-            }
-        }
+        if (!spill_tsv.empty() && ms_inspect::run_spillover_tsv(*opt, spill_tsv))
+            std::cout << "Spillover TSV written to " << spill_tsv << "\n";
         return 0;
     }
 

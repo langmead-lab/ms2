@@ -29,7 +29,7 @@
  * The counts take one pass over the rows per structure, shared among
  * threads.  tms parts are loaded one group at a time (LF with psi, then
  * phi's lengths-based form, then phi's starts-based form with phi_inv), as
- * tms-batch loads them, so that less of a large index is held at once.
+ * query loads them, so that less of a large index is held at once.
  */
 
 #ifndef _SPLIT_REPORT_HPP
@@ -232,8 +232,8 @@ inline ulint count_runs(ulint m, Chr&& chr) {
 inline int report_ms(const std::string& path, size_t threads, std::ostream& os) {
     auto t0 = std::chrono::steady_clock::now();
     auto opt = ms_serialize::read_index(path);
-    if (!opt) { std::cerr << "Failed to load ms index: " << path << "\n"; return 1; }
-    os << "index: " << path << " format=ORBITIDX tool=ms load_s="
+    if (!opt) { std::cerr << "Failed to load min index: " << path << "\n"; return 1; }
+    os << "index: " << path << " format=ORBITIDX layout=min load_s="
        << std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() << "\n";
     const auto& lf = opt->impl();
     using Impl = std::remove_cv_t<std::remove_reference_t<decltype(lf)>>;
@@ -272,7 +272,7 @@ inline std::optional<TmsIndex> load_tms(const std::string& path, const TmsParts&
     try {
         idx.load(in, need);
     } catch (const std::exception& e) {
-        std::cerr << "Failed to load tms index " << path << ": " << e.what() << "\n";
+        std::cerr << "Failed to load index " << path << ": " << e.what() << "\n";
         return std::nullopt;
     }
     os << "load: " << what << " load_s=" << std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()
@@ -289,7 +289,7 @@ inline int report_tms(const std::string& path, size_t threads, std::ostream& os)
         std::cerr << path << ": " << e.what() << "\n";
         return 1;
     }
-    os << "index: " << path << " format=ORBITIDX tool=tms layout=" << TmsIndex::layout_name(held)
+    os << "index: " << path << " format=ORBITIDX layout=" << TmsIndex::layout_name(held)
        << " phi_inv=" << (held.phi_inv ? "yes" : "no") << "\n";
     {
         // LF, with the PSI columns in the psi and full layouts.
@@ -316,7 +316,7 @@ inline int report_tms(const std::string& path, size_t threads, std::ostream& os)
                                      : "runs stored with LF, those the build split";
         if (f.stored == orbit::NO_SPLITTING)
             f.note = held.psi ? "the format stores no LF split parameters: the rows are the union of LF's "
-                                "intervals split with tms-build's --lf-split (default length capping 8, "
+                                "intervals split with build's --lf-split (default length capping 8, "
                                 "balancing 16) and their images, built with NO_SPLITTING and not rebalanced, so "
                                 "the stored params are NO_SPLITTING and runs_stored is the row count"
                               : "stored as NO_SPLITTING";
