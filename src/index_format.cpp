@@ -97,11 +97,50 @@ std::string verify_file(const std::string& path) {
     }
 }
 
-void add_section(const std::string& from, const std::string& to, SectionSource& s, const std::string& info) {
+namespace {
+/** Open from for reading and check that to is another file. */
+std::ifstream open_copy(const std::string& from, const std::string& to) {
     if (std::filesystem::exists(to) && std::filesystem::equivalent(from, to))
         throw std::runtime_error("the output must be another file than the input");
     std::ifstream in(from, std::ios::binary);
     if (!in.good()) throw std::runtime_error("cannot open " + from);
+    return in;
+}
+
+/**
+ * Set the offsets of sections, laid out in order after the header, and
+ * return the offsets they had in the file they are copied from.
+ */
+std::vector<uint64_t> lay_out(std::vector<SectionEntry>& sections) {
+    std::vector<uint64_t> from_offsets;
+    uint64_t at = HEADER_BYTES;
+    for (auto& e : sections) {
+        from_offsets.push_back(e.offset);
+        e.offset = align_up(at);
+        at = e.offset + e.bytes;
+    }
+    return from_offsets;
+}
+
+/** Copy section e from offset at in in (the file from) to out, checking its CRC-32. */
+void copy_section(std::ifstream& in, const std::string& from, std::ostream& out, const SectionEntry& e, uint64_t at,
+                  std::vector<char>& buf) {
+    in.seekg(static_cast<std::streamoff>(at));
+    uint32_t crc = 0;
+    for (uint64_t left = e.bytes; left > 0;) {
+        const size_t k = static_cast<size_t>(std::min<uint64_t>(left, buf.size()));
+        in.read(buf.data(), static_cast<std::streamsize>(k));
+        if (!in.good()) throw std::runtime_error(from + ": section " + section_name(e.id) + " is truncated");
+        crc = crc32(crc, buf.data(), k);
+        out.write(buf.data(), static_cast<std::streamsize>(k));
+        left -= k;
+    }
+    if (crc != e.crc) throw std::runtime_error(from + ": section " + section_name(e.id) + " fails its CRC-32");
+}
+}  // namespace
+
+void add_section(const std::string& from, const std::string& to, SectionSource& s, const std::string& info) {
+    std::ifstream in = open_copy(from, to);
     Header h = read_header_file(from);
     // Size and checksum the new payload, then lay out every section, the
     // new one where a section it replaces was, else last.
@@ -119,13 +158,7 @@ void add_section(const std::string& from, const std::string& to, SectionSource& 
         if (sections[i].id == added.id) slot = i;
     if (slot == sections.size()) sections.push_back(added);
     else sections[slot] = added;
-    std::vector<uint64_t> from_offsets;
-    uint64_t at = HEADER_BYTES;
-    for (auto& e : sections) {
-        from_offsets.push_back(e.offset);
-        e.offset = align_up(at);
-        at = e.offset + e.bytes;
-    }
+    const std::vector<uint64_t> from_offsets = lay_out(sections);
     Header out_h = h;
     out_h.sections = sections;
     out_h.info += info;
@@ -150,17 +183,34 @@ void add_section(const std::string& from, const std::string& to, SectionSource& 
                 throw std::logic_error(std::string("section ") + section_name(added.id) + " serialized differently twice");
             continue;
         }
-        in.seekg(static_cast<std::streamoff>(from_offsets[i]));
-        uint32_t crc = 0;
-        for (uint64_t left = e.bytes; left > 0;) {
-            const size_t k = static_cast<size_t>(std::min<uint64_t>(left, buf.size()));
-            in.read(buf.data(), static_cast<std::streamsize>(k));
-            if (!in.good()) throw std::runtime_error(from + ": section " + section_name(e.id) + " is truncated");
-            crc = crc32(crc, buf.data(), k);
-            out.write(buf.data(), static_cast<std::streamsize>(k));
-            left -= k;
-        }
-        if (crc != e.crc) throw std::runtime_error(from + ": section " + section_name(e.id) + " fails its CRC-32");
+        copy_section(in, from, out, e, from_offsets[i], buf);
+    }
+    out.flush();
+    if (!out.good()) throw std::runtime_error("failed writing " + to);
+}
+
+void drop_sections(const std::string& from, const std::string& to, uint32_t drop, Layout layout,
+                   const std::string& info) {
+    std::ifstream in = open_copy(from, to);
+    const Header h = read_header_file(from);
+    std::vector<SectionEntry> kept;
+    for (const auto& e : h.sections)
+        if (!(drop & section_bit(e.id))) kept.push_back(e);
+    const std::vector<uint64_t> from_offsets = lay_out(kept);
+    Header out_h = h;
+    out_h.layout = layout;
+    out_h.sections = kept;
+    out_h.info += info;
+    const std::vector<char> hb = encode_header(out_h);
+    std::ofstream out(to, std::ios::binary | std::ios::trunc);
+    if (!out.good()) throw std::runtime_error("cannot open " + to + " for writing");
+    out.write(hb.data(), static_cast<std::streamsize>(hb.size()));
+    uint64_t pos = HEADER_BYTES;
+    std::vector<char> buf(size_t(1) << 22);
+    for (size_t i = 0; i < kept.size(); ++i) {
+        detail::write_zeros(out, kept[i].offset - pos);
+        pos = kept[i].offset + kept[i].bytes;
+        copy_section(in, from, out, kept[i], from_offsets[i], buf);
     }
     out.flush();
     if (!out.good()) throw std::runtime_error("failed writing " + to);

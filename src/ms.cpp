@@ -67,8 +67,9 @@ static void usage(std::ostream& os, bool advanced = false) {
        << "Options take their value as --name VALUE or --name=VALUE.\n"
        << "\n"
        << "Build an index:\n"
-       << "  build HEADS LENS INDEX --layout min|psi|phi|full [--minima FILE] [--phi FILE]\n"
-       << "        [--seq-ids FILE] [--no-phi-inv] [--lf-split FACTOR] [--phi-split FACTOR]\n"
+       << "  build HEADS LENS INDEX --layout min|psi|phi|full|psi-locate [--minima FILE]\n"
+       << "        [--phi FILE] [--seq-ids FILE] [--no-phi-inv] [--lf-split FACTOR]\n"
+       << "        [--phi-split FACTOR]\n"
        << "      Build an index from an RLBWT (HEADS: one byte per run; LENS:\n"
        << "      fixed-width little-endian run lengths).  --layout, which has no\n"
        << "      default, says what the index keeps and so which --mode it serves:\n"
@@ -78,12 +79,16 @@ static void usage(std::ostream& os, bool advanced = false) {
        << "              head and least LCP below it); serves --mode phi, positions\n"
        << "              and SMEMs\n"
        << "        full  everything psi and phi keep; serves every mode\n"
+       << "        psi-locate\n"
+       << "              full without phi's lengths-based form, which only walks of\n"
+       << "              phi read; serves --mode psi with positions and SMEMs, and\n"
+       << "              takes less disk than full but loads as much\n"
        << "      Every layout but psi needs --minima, a TeraLCP -ominima file.\n"
        << "      Alone, it needs a BWT with one terminator; with --phi (a TeraLCP\n"
-       << "      -ophi file of the same BWT), a phi or full index takes phi from its\n"
+       << "      -ophi file of the same BWT), an index with phi takes phi from its\n"
        << "      samples and the BWT may have one terminator per string, as an FMD\n"
        << "      does.  --no-phi-inv drops phi_inv, which only --report smem-all\n"
-       << "      reads.  --seq-ids stores ropebwt3's sequence-ID table (the FMD's\n"
+       << "      reads; psi-locate keeps it.  --seq-ids stores ropebwt3's sequence-ID table (the FMD's\n"
        << "      .len.gz) for smem-all.  --lf-split sets Orbit's balancing factor for\n"
        << "      LF (positive; default: Orbit's default) and --phi-split for phi (0\n"
        << "      leaves phi unsplit).  Results do not depend on either.  build refuses\n"
@@ -110,11 +115,12 @@ static void usage(std::ostream& os, bool advanced = false) {
        << "                             summaries and walks phi only over the current\n"
        << "                             row; dual does as phi, and where the summaries\n"
        << "                             leave a side open, races a psi walk against\n"
-       << "                             phi's.  min needs a min index, psi a psi or full\n"
-       << "                             index, phi a phi or full index, and dual a full\n"
-       << "                             index.  The default is min on a min index, phi\n"
-       << "                             on a phi index, and psi otherwise.\n"
-       << "  needs a phi or full index:\n"
+       << "                             phi's.  min needs a min index, psi a psi, full\n"
+       << "                             or psi-locate index, phi a phi or full index,\n"
+       << "                             and dual a full index.  The default is min on a\n"
+       << "                             min index, phi on a phi index, and psi\n"
+       << "                             otherwise.\n"
+       << "  needs a phi, full or psi-locate index:\n"
        << "    --positions              add a field with an occurrence position for each\n"
        << "                             value (-1 where it is 0)\n"
        << "    --report ms|smem-one|smem-all\n"
@@ -146,9 +152,12 @@ static void usage(std::ostream& os, bool advanced = false) {
        << "  index-verify INDEX\n"
        << "      Check every section's CRC-32 and that the file is whole.\n"
        << "  index-add-seq-ids INDEX SEQ_IDS OUT\n"
-       << "      Write INDEX, a psi, phi or full index, to OUT with the sequence-ID\n"
-       << "      table SEQ_IDS (see build --seq-ids), copying its other sections\n"
-       << "      unchanged.\n";
+       << "      Write INDEX, a psi, phi, full or psi-locate index, to OUT with the\n"
+       << "      sequence-ID table SEQ_IDS (see build --seq-ids), copying its other\n"
+       << "      sections unchanged.\n"
+       << "  index-psi-locate INDEX OUT\n"
+       << "      Write INDEX, a full index with phi_inv, to OUT as a psi-locate index\n"
+       << "      (see build --layout), copying every section but PHI_LEN unchanged.\n";
     if (!advanced) os << "\nRun 'ms2 --help-advanced' for development and advanced options.\n";
 }
 
@@ -172,7 +181,7 @@ static void usage_advanced(std::ostream& os) {
        << "                             from the reads seen so far\n"
        << "    --block-bytes BYTES      each thread takes BYTES bytes of input at a time\n"
        << "    --no-output              skip writing results (for timing)\n"
-       << "    --phi-starts             on a phi or full index, matching statistics\n"
+       << "    --phi-starts             on an index with phi, matching statistics\n"
        << "                             without positions load phi's starts-based form,\n"
        << "                             not its narrower lengths-based form\n"
        << "    --count walk|backward|adaptive\n"
@@ -1134,7 +1143,7 @@ static int run_batch(const QueryOptions& o, std::optional<Index> (*read)(const s
 
 /**
  * The layout of the index whose header is h: min for an ms index, else
- * psi, phi or full by the parts it holds.
+ * psi, phi, full or psi-locate by the parts it holds.
  */
 static std::string layout_of(const orbit_idx::Header& h) {
     return h.tool == orbit_idx::Tool::MS ? "min" : TmsIndex::layout_name(TmsIndex::held_parts(h));
@@ -1147,7 +1156,7 @@ static std::string layout_of(const orbit_idx::Header& h) {
  */
 static std::string mode_needs(TmsMode m) {
     switch (m) {
-    case TmsMode::PSI: return "a psi or full index";
+    case TmsMode::PSI: return "a psi, full or psi-locate index";
     case TmsMode::PHI:
     case TmsMode::PHI_WALK: return "a phi or full index";
     case TmsMode::DUAL:
@@ -1203,8 +1212,11 @@ static int run_query(int argc, char** argv) {
         std::cerr << "Unknown mode: " << o.mode << "\n";
         return 1;
     }
-    const TmsParts need = tms_query_parts(g_tms_mode, false, TmsReport::MS);
-    if ((need.psi && !held.psi) || (need.phi && !held.phi)) {
+    // A psi-locate index holds phi's starts-based form alone, which a mode
+    // that walks phi reads only with --phi-starts.
+    TmsParts need = tms_query_parts(g_tms_mode, false, TmsReport::MS);
+    need.phi_starts = need.phi_starts || (need.phi && g_tms_phi_starts);
+    if (!TmsIndex::serves(held, TmsParts{need.psi, need.phi, false, need.phi_starts})) {
         std::cerr << "query: --mode " << o.mode << " needs " << mode_needs(g_tms_mode) << ", and " << o.idx_path
                   << " is a " << layout << " index\n";
         return 1;
@@ -1229,7 +1241,7 @@ struct BuildOptions {
     bool coalesce = false, minima_only = false;
     ulint spill_align = 0;
     uchar spill_split_bits = 0;
-    // psi, phi and full.
+    // psi, phi, full and psi-locate.
     bool phi_inv = true, no_lcp_summary = false;
 };
 
@@ -1296,7 +1308,7 @@ static int build_min(const BuildOptions& o) {
     return 0;
 }
 
-/** build --layout psi, phi or full. */
+/** build --layout psi, phi, full or psi-locate. */
 static int build_layout(const BuildOptions& o) {
     const std::string &minima_path = o.minima_path, &lcp_bin_path = o.lcp_bin_path, &phi_path = o.phi_path;
     const std::string &seq_ids_path = o.seq_ids_path, &idx_path = o.idx_path;
@@ -1305,9 +1317,12 @@ static int build_layout(const BuildOptions& o) {
     opts.lf_split = o.lf_split;
     opts.phi_split = o.phi_split;
     opts.phi_inv = o.phi_inv;
-    opts.layout = o.layout == "psi" ? TmsLayout::PSI : o.layout == "phi" ? TmsLayout::PHI : TmsLayout::FULL;
-    // The phi and full layouts hold phi, and the LCP summaries unless told
-    // otherwise.
+    opts.layout = o.layout == "psi"          ? TmsLayout::PSI
+                  : o.layout == "phi"        ? TmsLayout::PHI
+                  : o.layout == "psi-locate" ? TmsLayout::PSI_LOCATE
+                                             : TmsLayout::FULL;
+    // The phi, full and psi-locate layouts hold phi, and the LCP summaries
+    // unless told otherwise.
     const bool with_phi = opts.layout != TmsLayout::PSI;
     const bool lcp_summary = with_phi && !o.no_lcp_summary;
     if (!minima_path.empty() && !lcp_bin_path.empty()) {
@@ -1519,14 +1534,16 @@ static int run_build(int argc, char** argv) {
           "--spill-align", "--spill-split-bits"}},
         {"psi", {"--seq-ids", "--lf-split"}},
         {"phi", phi_takes},
-        {"full", phi_takes}};
+        {"full", phi_takes},
+        {"psi-locate",
+         {"--minima", "--lcp-bin", "--phi", "--seq-ids", "--lf-split", "--phi-split", "--no-lcp-summary"}}};
     if (o.layout.empty()) {
-        std::cerr << "build needs --layout min, psi, phi or full (see ms2 --help)\n";
+        std::cerr << "build needs --layout min, psi, phi, full or psi-locate (see ms2 --help)\n";
         return 1;
     }
     const auto it = takes.find(o.layout);
     if (it == takes.end()) {
-        std::cerr << "Unknown layout: " << o.layout << " (expected min, psi, phi or full)\n";
+        std::cerr << "Unknown layout: " << o.layout << " (expected min, psi, phi, full or psi-locate)\n";
         return 1;
     }
     for (const std::string& g : o.given)
@@ -1890,9 +1907,7 @@ static int run_command(int argc, char** argv) {
         // header's sections: TmsIndex::sections_for, and the start tables
         // load() builds with phi_inv.
         const TmsParts held = TmsIndex::held_parts(h);
-        auto serves = [&](const TmsParts& need) {
-            return (!need.psi || held.psi) && (!need.phi || held.phi) && (!need.phi_inv || held.phi_inv);
-        };
+        auto serves = [&](const TmsParts& need) { return TmsIndex::serves(held, need); };
         auto describe_plan = [&](const TmsParts& need) {
             std::ostringstream os;
             const uint32_t mask = TmsIndex::sections_for(need);
@@ -2028,6 +2043,27 @@ static int run_command(int argc, char** argv) {
                       << ")\n";
         } catch (const std::exception& e) {
             std::cerr << "index-add-seq-ids: " << e.what() << "\n";
+            return 1;
+        }
+        return 0;
+    }
+    if (cmd == "index-psi-locate") {
+        if (argc < 2) { std::cerr << "index-psi-locate requires INDEX and OUT\n"; return 1; }
+        try {
+            const orbit_idx::Header h = orbit_idx::read_header_file(argv[0]);
+            if (h.tool != orbit_idx::Tool::TMS || h.layout != orbit_idx::Layout::FULL)
+                throw std::runtime_error(std::string(argv[0]) + " is not a full index");
+            if (!TmsIndex::held_parts(h).phi_inv) throw std::runtime_error(std::string(argv[0]) + " holds no phi_inv");
+            std::string info = build_info();
+            info.replace(info.find("built_by="), 9, "psi_locate_by=");
+            info.replace(info.find("built_at="), 9, "psi_locate_at=");
+            const auto t0 = std::chrono::steady_clock::now();
+            orbit_idx::drop_sections(argv[0], argv[1], orbit_idx::section_bit(orbit_idx::Section::PHI_LEN),
+                                     orbit_idx::Layout::PSI_LOCATE, info);
+            std::cout << "Wrote " << argv[1] << ": " << argv[0] << " as a psi-locate index (s="
+                      << std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() << ")\n";
+        } catch (const std::exception& e) {
+            std::cerr << "index-psi-locate: " << e.what() << "\n";
             return 1;
         }
         return 0;
