@@ -1,6 +1,6 @@
 # ms2
 
-ms2 computes matching statistics and super-maximal exact matches (SMEMs) of reads against a large, repetitive text, such as a pangenome, using move structures from the [Orbit](https://github.com/drnatebrown/orbit) library.
+ms2 computes matching statistics and super-maximal exact matches (SMEMs) of reads against a large, repetitive text, such as a pangenome, using move structures.  It builds on both the TeraTools library [TeraTools](https://github.com/ucfcbb/TeraTools) and the [Orbit](https://github.com/drnatebrown/orbit) library.
 
 - The **matching statistics** of a read give, for each offset i, the length of the longest prefix of the read's suffix starting at i that occurs somewhere in the text.
 - An **SMEM** is a match between the read and the text that cannot be extended in either direction and is not contained in a longer such match. ms2 can write SMEMs with all of their text occurrences in the format of `ropebwt3 mem -p`.
@@ -78,6 +78,4 @@ ms2's own source is under the MIT license (see [LICENSE](LICENSE)), with parts t
 
 ## Acknowledgements
 
-ms2 is by Ben Langmead. It is built on Orbit, the move-structure library by Nathaniel Brown. Its psi and phi query engine follows the design and code of TeraTools (TeraMS and TeraLCP) by Ahsan Sanaullah, Shaojie Zhang and the S. Zhang Lab at UCF, and it builds from TeraLCP's output. fmd2rlbwt uses ropebwt3's FMD reader by Heng Li.
-
-Prepared by Ben Langmead with help from Claude Code (Opus 5.5).
+ms2 builts on Orbit, the move-structure library by Nathaniel Brown, and TeraTools, the move-structure building library and its TeraMS component for computing matching statistics.  Its psi and phi query engine follows the design and code of TeraTools (TeraMS and TeraLCP) by Ahsan Sanaullah, Shaojie Zhang and the S. Zhang Lab at UCF, and it builds from TeraLCP's output. fmd2rlbwt uses ropebwt3's FMD reader by Heng Li.
