@@ -46,7 +46,7 @@ debug: ms2
 tms_chain_bench: tms_chain_bench.cpp index_format.cpp $(MS_HDRS)
 	$(CXX) $(CXXFLAGS) -o tms_chain_bench tms_chain_bench.cpp index_format.cpp
 
-.PHONY: test test-threads test-reader test-ftab all clean debug bench
+.PHONY: test test-latency test-threads test-reader test-ftab all clean debug bench
 test: ms2
 	./ms2 test ../data
 
@@ -61,6 +61,10 @@ test-reader: read_chunks_test
 # Output identity across interleave, thread count and block size
 test-threads: ms2
 	./test_threads.sh ./ms2 ../data
+
+# Per-step latency histogram of ms2-steps against ms2-bench output
+test-latency: ms2-bench ms2-steps
+	./test_latency.sh ./ms2-bench ./ms2-steps ../data
 
 # Stored ftabs: ftab-build, ftab-verify and byte identity with --ftab-file
 test-ftab: ms2

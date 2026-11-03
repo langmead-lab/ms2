@@ -1109,8 +1109,10 @@ inline std::vector<ulint> ms_query(MSIndexSpillLCP<SP>& idx, const std::string& 
 #endif
     for (size_t i = pattern.size(); i > 0; --i) {
 #ifdef MS_STEP_STATS
-        // Rows read are the reposition walks' rows, up and down.
-        StepProbe probe(pattern.size() - i, &ms_stats.repositions, &ms_stats.walk_up, &ms_stats.walk_down);
+        // Rows read are the reposition walks' rows, up and down, which are
+        // also its walk steps.
+        StepProbe probe(pattern.size() - i, &ms_stats.repositions, &ms_stats.walk_up, &ms_stats.walk_down,
+                        &ms_stats.walk_up, &ms_stats.walk_down);
 #endif
         uchar c = static_cast<uchar>(pattern[i - 1]);
         if (idx.get_character(pos.interval) == c) {

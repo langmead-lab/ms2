@@ -15,6 +15,12 @@
  * N (an FMD's, for one) matches a read's N rather than restarting there, but
  * an ftab over ACGT has no entry for a window holding one either way.  Reads are recorded only when one is in flight
  * at a time (query with --interleave 0).
+ *
+ * flush() also files every step into a latency histogram (LatAgg): cycles
+ * per step in log-spaced buckets, and for each bucket what its steps did
+ * (repositions, LCE walk steps, rows crossed by fast-forwards), so that the
+ * slowest steps can be attributed after the run.  query writes it to the
+ * file named by the environment variable MS_LAT_OUT.
  */
 
 #ifndef _STEP_STATS_HPP
@@ -25,8 +31,11 @@
 #include "orbit/common.hpp"
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <ostream>
+#include <string>
 #include <vector>
 #if defined(__x86_64__) || defined(__i386__)
 #include <x86intrin.h>
@@ -37,10 +46,141 @@ using step_ulint = orbit::ulint;
 inline uint64_t step_ticks() {
 #if defined(__x86_64__) || defined(__i386__)
     return __rdtsc();
+#elif defined(__aarch64__)
+    // The virtual counter: coarse (24 MHz on Apple silicon), for tests.
+    uint64_t v;
+    asm volatile("mrs %0, cntvct_el0" : "=r"(v));
+    return v;
 #else
     return 0;
 #endif
 }
+
+/** Ticks of step_ticks per second, measured against steady_clock over about ms milliseconds. */
+inline double step_ticks_hz(unsigned ms = 200) {
+    using clock = std::chrono::steady_clock;
+    const auto t0 = clock::now();
+    const uint64_t c0 = step_ticks();
+    auto t1 = t0;
+    while (t1 - t0 < std::chrono::milliseconds(ms)) t1 = clock::now();
+    const uint64_t c1 = step_ticks();
+    return double(c1 - c0) / std::chrono::duration<double>(t1 - t0).count();
+}
+
+// Rows crossed by the fast-forwards of every move (MS_FF) since the step in
+// flight began.
+inline thread_local step_ulint step_ff_rows = 0;
+
+/**
+ * Per-step latency: a histogram of ticks per step with 32 log-spaced buckets
+ * per power of two (each about 2% wide), exact below 32 ticks, and for each
+ * bucket the steps' repositions, LCE walk steps and fast-forward rows, as
+ * sums and as counts by size class (class 0 is 0, class c >= 1 is
+ * [2^(c-1), 2^c), the last class open above).
+ */
+struct LatAgg {
+    static constexpr unsigned SUB_BITS = 5;
+    static constexpr size_t SUB = size_t(1) << SUB_BITS;
+    static constexpr size_t NB = SUB * (64 - SUB_BITS + 1);
+    static constexpr size_t L = 26;
+    struct Bin {
+        step_ulint n = 0, reps = 0, walk = 0, ff = 0, rows = 0;
+        std::array<step_ulint, L> walk_cls{}, ff_cls{};
+    };
+    std::vector<Bin> bins;  // NB once any step is added
+    step_ulint steps = 0, reps = 0, max = 0;
+    double sum = 0, sumsq = 0;
+
+    static size_t bucket(uint64_t c) {
+        if (c < SUB) return size_t(c);
+        const unsigned e = 63u - unsigned(__builtin_clzll(c));
+        return SUB * (e - SUB_BITS + 1) + size_t((c >> (e - SUB_BITS)) & (SUB - 1));
+    }
+    /** The smallest tick count in bucket b; bucket b + 1 starts where it ends. */
+    static uint64_t bucket_lo(size_t b) {
+        if (b < SUB) return b;
+        const unsigned e = unsigned(b / SUB) + SUB_BITS - 1;
+        return uint64_t(SUB + b % SUB) << (e - SUB_BITS);
+    }
+    static size_t cls(step_ulint x) {
+        return x == 0 ? 0 : std::min<size_t>(L - 1, size_t(64 - __builtin_clzll(uint64_t(x))));
+    }
+    void add(uint64_t cyc, step_ulint r, step_ulint walk, step_ulint ff, step_ulint rows) {
+        if (bins.empty()) bins.resize(NB);
+        Bin& b = bins[bucket(cyc)];
+        ++b.n;
+        b.reps += r;
+        b.walk += walk;
+        b.ff += ff;
+        b.rows += rows;
+        ++b.walk_cls[cls(walk)];
+        ++b.ff_cls[cls(ff)];
+        ++steps;
+        reps += r;
+        max = std::max<step_ulint>(max, cyc);
+        sum += double(cyc);
+        sumsq += double(cyc) * double(cyc);
+    }
+    LatAgg& operator+=(const LatAgg& o) {
+        if (o.bins.empty()) return *this;
+        if (bins.empty()) bins.resize(NB);
+        for (size_t i = 0; i < NB; ++i) {
+            Bin& a = bins[i];
+            const Bin& b = o.bins[i];
+            a.n += b.n; a.reps += b.reps; a.walk += b.walk; a.ff += b.ff; a.rows += b.rows;
+            for (size_t c = 0; c < L; ++c) { a.walk_cls[c] += b.walk_cls[c]; a.ff_cls[c] += b.ff_cls[c]; }
+        }
+        steps += o.steps; reps += o.reps; max = std::max(max, o.max);
+        sum += o.sum; sumsq += o.sumsq;
+        return *this;
+    }
+    /** The lower edge of the bucket holding the step of rank ceil(q * steps). */
+    uint64_t quantile(double q) const {
+        if (steps == 0) return 0;
+        const double want = std::max(1.0, std::ceil(q * double(steps)));
+        step_ulint acc = 0;
+        for (size_t i = 0; i < bins.size(); ++i) {
+            acc += bins[i].n;
+            if (double(acc) >= want) return bucket_lo(i);
+        }
+        return max;
+    }
+    /** One summary line, in ticks and, with hz, in nanoseconds. */
+    void print_summary(std::ostream& os, const char* tag, double hz) const {
+        const double mean = steps ? sum / double(steps) : 0;
+        const double var = steps ? std::max(0.0, sumsq / double(steps) - mean * mean) : 0;
+        os << tag << ": steps=" << steps << " reps=" << reps << " mean=" << mean
+           << " sd=" << std::sqrt(var) << " p50=" << quantile(0.5) << " p99=" << quantile(0.99)
+           << " p999=" << quantile(0.999) << " max=" << max << " ticks_hz=" << hz;
+        if (hz > 0) {
+            const double ns = 1e9 / hz;
+            os << " p50_ns=" << double(quantile(0.5)) * ns << " p99_ns=" << double(quantile(0.99)) * ns
+               << " p999_ns=" << double(quantile(0.999)) * ns << " max_ns=" << double(max) * ns;
+        }
+        os << "\n";
+    }
+    /**
+     * The whole histogram: a header, the summary, then one line per
+     * nonempty bucket: its tick range [lo, hi), the counts and sums, and
+     * the walk and fast-forward class counts.
+     */
+    void print(std::ostream& os, double hz) const {
+        os << "lat-format: ms2-latency-v1 sub_bits=" << SUB_BITS << " classes=" << L << "\n";
+        print_summary(os, "lat", hz);
+        os << "lat-cols: lo hi n reps walk ff rows walk_cls[" << L << "] ff_cls[" << L << "]\n";
+        for (size_t i = 0; i < bins.size(); ++i) {
+            const Bin& b = bins[i];
+            if (b.n == 0) continue;
+            os << "lat-bin " << bucket_lo(i) << ' ' << bucket_lo(i + 1) << ' ' << b.n << ' ' << b.reps << ' '
+               << b.walk << ' ' << b.ff << ' ' << b.rows;
+            for (size_t c = 0; c < L; ++c) os << ' ' << b.walk_cls[c];
+            for (size_t c = 0; c < L; ++c) os << ' ' << b.ff_cls[c];
+            os << "\n";
+        }
+    }
+};
+
+inline thread_local LatAgg lat_agg;
 
 /** Counts summed over reads. */
 struct StepAgg {
@@ -97,7 +237,7 @@ inline thread_local StepAgg step_agg;
 
 /** The steps of the read in flight. */
 struct StepRecorder {
-    std::vector<step_ulint> reps, rows, cyc;
+    std::vector<step_ulint> reps, rows, cyc, walk, ff;
     const step_ulint* ms = nullptr;  // the read's statistics, complete when it is finished
     const char* pat = nullptr;       // the read
     size_t m = 0;
@@ -112,13 +252,17 @@ struct StepRecorder {
         reps.assign(m, 0);
         rows.assign(m, 0);
         cyc.assign(m, 0);
+        walk.assign(m, 0);
+        ff.assign(m, 0);
         pending = true;
     }
-    void add(size_t t, step_ulint r, step_ulint w, step_ulint c) {
+    void add(size_t t, step_ulint r, step_ulint w, step_ulint c, step_ulint wk, step_ulint f) {
         if (!pending || t >= m) return;
         reps[t] += r;
         rows[t] += w;
         cyc[t] += c;
+        walk[t] += wk;
+        ff[t] += f;
     }
     /** File the read in flight, if any, into step_agg. */
     void flush() {
@@ -163,6 +307,7 @@ struct StepRecorder {
         window(0, a.start_fit, a.start_jump, a.start_jump_reps, a.start_jump_rows, a.start_jump_cyc);
         bool any_other = false;
         size_t seg = SIZE_MAX;  // first step after the last run of characters other than ACGT
+        for (size_t t = 0; t < m; ++t) lat_agg.add(cyc[t], reps[t], walk[t], ff[t], rows[t]);
         for (size_t t = 0; t < m; ++t) {
             const size_t b = std::min(t, J);
             a.steps[b] += 1;
@@ -196,26 +341,47 @@ struct StepRecorder {
 inline thread_local StepRecorder step_rec;
 
 /**
- * Measures one visit to step t: the repositions and rows counted in
- * *reps and *rows_a + *rows_b, and the cycles, between its construction and
- * record(), which the destructor calls if nothing else has.
+ * Measures one visit to step t: the repositions counted in *reps, the rows
+ * in *rows_a + *rows_b, the LCE walk steps in *walk_a + *walk_b, the rows
+ * crossed by fast-forwards (step_ff_rows), and the cycles, between its
+ * construction and record(), which the destructor calls if nothing else has.
  */
 struct StepProbe {
     size_t t;
-    const step_ulint *reps, *rows_a, *rows_b;
-    step_ulint r0, w0;
+    const step_ulint *reps, *rows_a, *rows_b, *walk_a, *walk_b;
+    step_ulint r0, w0, k0, f0;
     uint64_t c0;
     bool done = false;
-    StepProbe(size_t step, const step_ulint* r, const step_ulint* wa, const step_ulint* wb)
-        : t(step), reps(r), rows_a(wa), rows_b(wb), r0(*r), w0(*wa + *wb), c0(step_ticks()) {}
+    StepProbe(size_t step, const step_ulint* r, const step_ulint* wa, const step_ulint* wb, const step_ulint* ka,
+              const step_ulint* kb)
+        : t(step), reps(r), rows_a(wa), rows_b(wb), walk_a(ka), walk_b(kb), r0(*r), w0(*wa + *wb),
+          k0(*ka + *kb), f0(step_ff_rows), c0(step_ticks()) {}
     void record() {
         if (done) return;
         done = true;
         const uint64_t c1 = step_ticks();
-        step_rec.add(t, *reps - r0, *rows_a + *rows_b - w0, c1 - c0);
+        step_rec.add(t, *reps - r0, *rows_a + *rows_b - w0, c1 - c0, *walk_a + *walk_b - k0, step_ff_rows - f0);
     }
     ~StepProbe() { record(); }
 };
+
+/**
+ * The cost of the probe itself: n probes around no work, through the same
+ * recorder, in a histogram of their ticks.  Call it outside any read.
+ */
+inline LatAgg step_probe_calibration(size_t n = 1000000) {
+    const std::string pat(n, 'A');
+    std::vector<step_ulint> ms(n, 0);
+    const step_ulint zero = 0;
+    step_rec.begin(pat.data(), n, ms.data());
+    for (size_t t = 0; t < n; ++t) {
+        StepProbe probe(t, &zero, &zero, &zero, &zero, &zero);
+    }
+    LatAgg cal;
+    for (size_t t = 0; t < n; ++t) cal.add(step_rec.cyc[t], 0, 0, 0, 0);
+    step_rec.pending = false;
+    return cal;
+}
 
 /**
  * Fast-forward lengths: for each move structure a query steps through, a
@@ -336,7 +502,7 @@ struct FFAgg {
 };
 
 inline thread_local FFAgg ff_agg;
-#define MS_FF(kind, k) (ff_agg.h[(kind)].add(static_cast<step_ulint>(k)))
+#define MS_FF(kind, k) (ff_agg.h[(kind)].add(static_cast<step_ulint>(k)), step_ff_rows += static_cast<step_ulint>(k))
 
 #endif /* MS_STEP_STATS */
 

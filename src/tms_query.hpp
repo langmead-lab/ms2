@@ -537,8 +537,10 @@ inline void tms_query_batch_impl(TmsIndex& idx, const Access acc, const std::vec
         for (Slot* sp = slots.data(); sp < end;) {
             Slot& s = *sp;
 #ifdef MS_STEP_STATS
-            // Rows read are the reposition scans' rows.
-            StepProbe probe(s.m - s.i, &tms_stats.repositions, &tms_stats.scan_rows, &no_rows);
+            // Rows read are the reposition scans' rows; walk steps are the
+            // LCE walks' psi and phi steps.
+            StepProbe probe(s.m - s.i, &tms_stats.repositions, &tms_stats.scan_rows, &no_rows, &tms_stats.psi_steps,
+                            &tms_stats.phi_steps);
 #endif
             const uchar c = static_cast<uchar>(s.pat[s.i - 1]);
             bool advanced = false;  // pat[i - 1] is done

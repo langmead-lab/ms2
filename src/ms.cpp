@@ -383,6 +383,10 @@ static bool g_record = false;
 static RepositionOracle g_oracle;
 // The query's --mode on an ms index.
 static MsMode g_ms_mode = MsMode::STANDARD;
+#ifdef MS_STEP_STATS
+// Each query thread's time selecting SMEMs from its statistics, part of query_s.
+inline thread_local double smem_select_s = 0.0;
+#endif
 
 // first_read is the index of p[0] among all the reads, which says where its
 // recorded repositions are in the oracle modes.
@@ -440,8 +444,14 @@ static void query_many(TmsIndex& idx, const std::vector<std::string>& p, size_t 
     if (!toeholds) r.pos.clear();
     if (!smems) return;
     const TmsCounting counting{g_tms_count, &g_tms_counter, &p};
+#ifdef MS_STEP_STATS
+    const auto ts = std::chrono::steady_clock::now();
+#endif
     tms_report_smems_batch(idx, r.ms, r.pos, g_tms_min_smem_len, g_tms_report, smem_k, r.hits,
                            g_tms_max_smem_positions, &counting);
+#ifdef MS_STEP_STATS
+    smem_select_s += std::chrono::duration<double>(std::chrono::steady_clock::now() - ts).count();
+#endif
 }
 static void query_many(TmsIndex& idx, const std::vector<std::string>& p, size_t k, QueryResults& r, size_t first_read) {
     query_many(idx, p, k, r, k, first_read);
@@ -977,6 +987,8 @@ static int run_batch(const QueryOptions& o, std::optional<Index> (*read)(const s
 #ifdef MS_STEP_STATS
     StepAgg step_total;
     FFAgg ff_total;
+    LatAgg lat_total;
+    double smem_select_total = 0.0;
 #endif
     auto t_all = clock::now();
     try {
@@ -1017,6 +1029,8 @@ static int run_batch(const QueryOptions& o, std::optional<Index> (*read)(const s
 #ifdef MS_STEP_STATS
                 step_total += step_agg;
                 ff_total += ff_agg;
+                lat_total += lat_agg;
+                smem_select_total += smem_select_s;
 #endif
             });
     } catch (const std::exception& e) {
@@ -1106,6 +1120,22 @@ static int run_batch(const QueryOptions& o, std::optional<Index> (*read)(const s
     if (interleave == 0) step_total.print(std::cerr);
     else std::cerr << "stepstats: none recorded; steps are recorded with --interleave 0\n";
     ff_total.print(std::cerr);
+    if (interleave == 0) {
+        // After the queries, so that neither the tick rate nor the probe's
+        // own cost is measured inside query time.
+        const double hz = step_ticks_hz();
+        const LatAgg cal = step_probe_calibration();
+        lat_total.print_summary(std::cerr, "lat", hz);
+        cal.print_summary(std::cerr, "lat-cal", hz);
+        std::cerr << "lat-smem: select_s=" << smem_select_total << "\n";
+        if (const char* path = std::getenv("MS_LAT_OUT")) {
+            std::ofstream lf(path);
+            lat_total.print(lf, hz);
+            cal.print_summary(lf, "lat-cal", hz);
+            lf << "lat-smem: select_s=" << smem_select_total << "\n";
+            if (!lf) std::cerr << "query: could not write MS_LAT_OUT " << path << "\n";
+        }
+    }
 #endif
 #ifdef TMS_STATS
     if (std::is_same_v<Index, TmsIndex> && g_tms_report == TmsReport::SMEM_ALL) {
