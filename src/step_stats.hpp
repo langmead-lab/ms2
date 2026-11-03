@@ -40,6 +40,13 @@
 #if defined(__x86_64__) || defined(__i386__)
 #include <x86intrin.h>
 #endif
+#include <map>
+#ifdef __linux__
+#include <fstream>
+#include <sched.h>
+#include <sstream>
+#include <sys/resource.h>
+#endif
 
 using step_ulint = orbit::ulint;
 
@@ -74,9 +81,11 @@ inline thread_local step_ulint step_ff_rows = 0;
 /**
  * Per-step latency: a histogram of ticks per step with 32 log-spaced buckets
  * per power of two (each about 2% wide), exact below 32 ticks, and for each
- * bucket the steps' repositions, LCE walk steps and fast-forward rows, as
- * sums and as counts by size class (class 0 is 0, class c >= 1 is
- * [2^(c-1), 2^c), the last class open above).
+ * bucket the steps' repositions, LCE walk steps, fast-forward rows and scan
+ * rows as sums, and two counts by size class (class 0 is 0, class c >= 1 is
+ * [2^(c-1), 2^c), the last class open above): steps with a reposition by
+ * the size of their walk, and steps without one by the rows their
+ * fast-forwards crossed.
  */
 struct LatAgg {
     static constexpr unsigned SUB_BITS = 5;
@@ -85,7 +94,7 @@ struct LatAgg {
     static constexpr size_t L = 26;
     struct Bin {
         step_ulint n = 0, reps = 0, walk = 0, ff = 0, rows = 0;
-        std::array<step_ulint, L> walk_cls{}, ff_cls{};
+        std::array<step_ulint, L> rep_walk_cls{}, norep_ff_cls{};
     };
     std::vector<Bin> bins;  // NB once any step is added
     step_ulint steps = 0, reps = 0, max = 0;
@@ -113,8 +122,8 @@ struct LatAgg {
         b.walk += walk;
         b.ff += ff;
         b.rows += rows;
-        ++b.walk_cls[cls(walk)];
-        ++b.ff_cls[cls(ff)];
+        if (r) ++b.rep_walk_cls[cls(walk)];
+        else ++b.norep_ff_cls[cls(ff)];
         ++steps;
         reps += r;
         max = std::max<step_ulint>(max, cyc);
@@ -128,7 +137,10 @@ struct LatAgg {
             Bin& a = bins[i];
             const Bin& b = o.bins[i];
             a.n += b.n; a.reps += b.reps; a.walk += b.walk; a.ff += b.ff; a.rows += b.rows;
-            for (size_t c = 0; c < L; ++c) { a.walk_cls[c] += b.walk_cls[c]; a.ff_cls[c] += b.ff_cls[c]; }
+            for (size_t c = 0; c < L; ++c) {
+                a.rep_walk_cls[c] += b.rep_walk_cls[c];
+                a.norep_ff_cls[c] += b.norep_ff_cls[c];
+            }
         }
         steps += o.steps; reps += o.reps; max = std::max(max, o.max);
         sum += o.sum; sumsq += o.sumsq;
@@ -162,19 +174,19 @@ struct LatAgg {
     /**
      * The whole histogram: a header, the summary, then one line per
      * nonempty bucket: its tick range [lo, hi), the counts and sums, and
-     * the walk and fast-forward class counts.
+     * the class counts of steps with and without a reposition.
      */
     void print(std::ostream& os, double hz) const {
-        os << "lat-format: ms2-latency-v1 sub_bits=" << SUB_BITS << " classes=" << L << "\n";
+        os << "lat-format: ms2-latency-v2 sub_bits=" << SUB_BITS << " classes=" << L << "\n";
         print_summary(os, "lat", hz);
-        os << "lat-cols: lo hi n reps walk ff rows walk_cls[" << L << "] ff_cls[" << L << "]\n";
+        os << "lat-cols: lo hi n reps walk ff rows rep_walk_cls[" << L << "] norep_ff_cls[" << L << "]\n";
         for (size_t i = 0; i < bins.size(); ++i) {
             const Bin& b = bins[i];
             if (b.n == 0) continue;
             os << "lat-bin " << bucket_lo(i) << ' ' << bucket_lo(i + 1) << ' ' << b.n << ' ' << b.reps << ' '
                << b.walk << ' ' << b.ff << ' ' << b.rows;
-            for (size_t c = 0; c < L; ++c) os << ' ' << b.walk_cls[c];
-            for (size_t c = 0; c < L; ++c) os << ' ' << b.ff_cls[c];
+            for (size_t c = 0; c < L; ++c) os << ' ' << b.rep_walk_cls[c];
+            for (size_t c = 0; c < L; ++c) os << ' ' << b.norep_ff_cls[c];
             os << "\n";
         }
     }
@@ -382,6 +394,76 @@ inline LatAgg step_probe_calibration(size_t n = 1000000) {
     step_rec.pending = false;
     return cal;
 }
+
+/**
+ * What the operating system did to the query: interrupts on the CPUs the
+ * process may run on, from /proc/interrupts, by source, and the process's
+ * page faults and context switches, from getrusage.  query takes one
+ * snapshot before the queries and one after, and prints the difference, so
+ * that index loading is left out.  Empty off Linux.
+ */
+struct OsSnapshot {
+    std::map<std::string, uint64_t> irq;
+    long minflt = 0, majflt = 0, nvcsw = 0, nivcsw = 0;
+    std::string cpus;
+
+    static OsSnapshot take() {
+        OsSnapshot o;
+#ifdef __linux__
+        cpu_set_t set;
+        CPU_ZERO(&set);
+        sched_getaffinity(0, sizeof(set), &set);
+        for (int c = 0; c < CPU_SETSIZE; ++c)
+            if (CPU_ISSET(c, &set)) o.cpus += (o.cpus.empty() ? "" : ",") + std::to_string(c);
+        std::ifstream f("/proc/interrupts");
+        std::string line;
+        // The header names the online CPUs' columns.
+        std::vector<int> cols;
+        if (std::getline(f, line)) {
+            std::istringstream h(line);
+            std::string w;
+            while (h >> w) cols.push_back(w.rfind("CPU", 0) == 0 ? std::stoi(w.substr(3)) : -1);
+        }
+        while (std::getline(f, line)) {
+            std::istringstream l(line);
+            std::string name;
+            l >> name;
+            if (name.empty() || name.back() != ':') continue;
+            name.pop_back();
+            uint64_t sum = 0;
+            for (size_t i = 0; i < cols.size(); ++i) {
+                uint64_t v;
+                if (!(l >> v)) break;
+                if (cols[i] >= 0 && CPU_ISSET(cols[i], &set)) sum += v;
+            }
+            o.irq[name] = sum;
+        }
+        rusage u{};
+        getrusage(RUSAGE_SELF, &u);
+        o.minflt = u.ru_minflt;
+        o.majflt = u.ru_majflt;
+        o.nvcsw = u.ru_nvcsw;
+        o.nivcsw = u.ru_nivcsw;
+#endif
+        return o;
+    }
+    /** One line: the CPUs, total interrupts and each nonzero source, and the rusage counts, from a to b. */
+    static void print_delta(std::ostream& os, const OsSnapshot& a, const OsSnapshot& b) {
+        uint64_t total = 0;
+        std::string detail;
+        for (const auto& [name, v] : b.irq) {
+            const auto it = a.irq.find(name);
+            const uint64_t d = v - (it == a.irq.end() ? 0 : it->second);
+            if (d == 0) continue;
+            total += d;
+            detail += (detail.empty() ? "" : ",") + name + ":" + std::to_string(d);
+        }
+        os << "lat-os: cpus=" << (b.cpus.empty() ? "-" : b.cpus) << " irq=" << total
+           << " irq_by=" << (detail.empty() ? "-" : detail) << " minflt=" << b.minflt - a.minflt
+           << " majflt=" << b.majflt - a.majflt << " nvcsw=" << b.nvcsw - a.nvcsw << " nivcsw=" << b.nivcsw - a.nivcsw
+           << "\n";
+    }
+};
 
 /**
  * Fast-forward lengths: for each move structure a query steps through, a

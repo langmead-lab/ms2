@@ -989,6 +989,7 @@ static int run_batch(const QueryOptions& o, std::optional<Index> (*read)(const s
     FFAgg ff_total;
     LatAgg lat_total;
     double smem_select_total = 0.0;
+    const OsSnapshot os_before = OsSnapshot::take();
 #endif
     auto t_all = clock::now();
     try {
@@ -1039,6 +1040,9 @@ static int run_batch(const QueryOptions& o, std::optional<Index> (*read)(const s
     }
     out->flush();
     const double total_s = std::chrono::duration<double>(clock::now() - t_all).count();
+#ifdef MS_STEP_STATS
+    const OsSnapshot os_after = OsSnapshot::take();
+#endif
     parse_s += numbering_parse_s;
     if (oracle_mode && reads_numbered != g_oracle.patterns()) {
         std::cerr << "query: the oracle holds " << g_oracle.patterns() << " reads but the input has "
@@ -1128,11 +1132,13 @@ static int run_batch(const QueryOptions& o, std::optional<Index> (*read)(const s
         lat_total.print_summary(std::cerr, "lat", hz);
         cal.print_summary(std::cerr, "lat-cal", hz);
         std::cerr << "lat-smem: select_s=" << smem_select_total << "\n";
+        OsSnapshot::print_delta(std::cerr, os_before, os_after);
         if (const char* path = std::getenv("MS_LAT_OUT")) {
             std::ofstream lf(path);
             lat_total.print(lf, hz);
             cal.print_summary(lf, "lat-cal", hz);
             lf << "lat-smem: select_s=" << smem_select_total << "\n";
+            OsSnapshot::print_delta(lf, os_before, os_after);
             if (!lf) std::cerr << "query: could not write MS_LAT_OUT " << path << "\n";
         }
     }

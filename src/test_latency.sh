@@ -49,7 +49,7 @@ name, lat, err = sys.argv[1:4]
 lines = open(lat).read().splitlines()
 e = open(err).read()
 bases = int(re.search(r'query: reads=\d+ bases=(\d+)', e).group(1))
-assert lines[0].startswith('lat-format: ms2-latency-v1'), lines[0]
+assert lines[0].startswith('lat-format: ms2-latency-v2'), lines[0]
 summ = dict(kv.split('=') for kv in lines[1].split()[1:])
 bins = [list(map(int, l.split()[1:])) for l in lines if l.startswith('lat-bin ')]
 L = int(re.search(r'classes=(\d+)', lines[0]).group(1))
@@ -59,7 +59,9 @@ assert sum(b[3] for b in bins) == int(summ['reps'])
 for b in bins:
     assert len(b) == 7 + 2 * L
     assert b[0] < b[1]
-    assert sum(b[7:7 + L]) == b[2] and sum(b[7 + L:]) == b[2]
+    assert sum(b[7:7 + L]) + sum(b[7 + L:]) == b[2]
+    assert sum(b[7:7 + L]) <= b[3]
+    assert b[3] or b[4] == 0
 assert all(x[1] <= y[0] for x, y in zip(bins, bins[1:]))
 assert bins[-1][0] <= int(summ['max']) < bins[-1][1]
 if name != 'min':
@@ -68,6 +70,7 @@ if name != 'min':
 assert sum(b[5] for b in bins) > 0, 'no fast-forward rows recorded'
 assert any(l.startswith('lat-cal: steps=1000000 ') for l in lines)
 assert any(l.startswith('lat-smem: select_s=') for l in lines)
+assert any(l.startswith('lat-os: cpus=') for l in lines)
 assert re.search(r'^lat: steps=%d ' % bases, e, re.M)
 PY
     echo "checked $name"
