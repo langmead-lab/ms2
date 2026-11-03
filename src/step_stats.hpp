@@ -50,13 +50,22 @@
 
 using step_ulint = orbit::ulint;
 
+// The counter read is fenced on both sides.  The fence before it waits for
+// every earlier instruction to finish, loads included, so a step's cache
+// misses fall inside its own interval; the fence after it keeps the next
+// step's work from starting before the read.  Unfenced, the read can issue
+// ahead of the step's outstanding loads, and their latency lands between
+// probes, outside every step.
 inline uint64_t step_ticks() {
 #if defined(__x86_64__) || defined(__i386__)
-    return __rdtsc();
+    _mm_lfence();
+    const uint64_t v = __rdtsc();
+    _mm_lfence();
+    return v;
 #elif defined(__aarch64__)
     // The virtual counter: coarse (24 MHz on Apple silicon), for tests.
     uint64_t v;
-    asm volatile("mrs %0, cntvct_el0" : "=r"(v));
+    asm volatile("isb\n\tmrs %0, cntvct_el0\n\tisb" : "=r"(v) : : "memory");
     return v;
 #else
     return 0;
@@ -177,7 +186,7 @@ struct LatAgg {
      * the class counts of steps with and without a reposition.
      */
     void print(std::ostream& os, double hz) const {
-        os << "lat-format: ms2-latency-v2 sub_bits=" << SUB_BITS << " classes=" << L << "\n";
+        os << "lat-format: ms2-latency-v2 sub_bits=" << SUB_BITS << " classes=" << L << " fenced=1\n";
         print_summary(os, "lat", hz);
         os << "lat-cols: lo hi n reps walk ff rows rep_walk_cls[" << L << "] norep_ff_cls[" << L << "]\n";
         for (size_t i = 0; i < bins.size(); ++i) {
