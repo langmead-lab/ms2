@@ -1,17 +1,12 @@
-# ORBITIDX: the Orbit-ms and Orbit-tms index format
+# ORBITIDX index format
 
-`ms2 build` writes this format, for a min index (Orbit-ms) and for psi, phi and full indexes (Orbit-tms). The first 4096 bytes of a file describe everything it holds: each move table, its columns in row order, and each column's bit width. The format describes what is stored. Which parts a query loads is the software's choice, so it can change without changing the format. Given that choice, the header alone says exactly what a query will hold in RAM; `ms2 index-plan INDEX` prints it. Code: `index_format.hpp` and `index_format.cpp`.
+This is the format output by `ms2 build` and used by all 4 modes of `ms2`. The first 4096 bytes of ORBITIDX describe each move table, its columns in row order, and each column's bit width. The format describes what is stored. The software loading the index can pick and choose with columns to take. Given that choice, the header alone says exactly what a query will hold in RAM; `ms2 index-plan INDEX` prints it. The source code for reading and writing is in `index_format.hpp` and `index_format.cpp`.
 
-All integers are little-endian. The endian check refuses a file written on a big-endian host.
+All integers are little-endian. The endian check refuses a big-endian file.
 
 ## Layout
 
-```
-[0, 4096)        header: fixed fields, section table, info text; zero padded
-[4096, ...)      sections, each starting on a 4096-byte boundary, in section-table order
-```
-
-The file ends where the last section ends; `ms2 index-verify` checks this along with every section's CRC-32.
+The file consists of a 4096-byte header, padded with 0s, followed by "sections", each starting at a 4096-byte boundary.  The file ends where the last section ends; `ms2 index-verify` checks this along with every section's CRC-32.
 
 ## Fixed fields (bytes 0 to 127)
 
@@ -31,6 +26,8 @@ The file ends where the last section ends; `ms2 index-verify` checks this along 
 | 48 | u64[4] | tool scalars. ms: max LCP top, max LCP min-sub, spill alignment, spill split bits. tms: 0 |
 | 80 | | reserved, 0 |
 
+Note that "ms" is a term used to describe the ms2-min index, and "tms" describes the other three index types: ms2-psi, ms2-phi and ms2-dual.
+
 ## Section table (from byte 128, 80 bytes per entry)
 
 | offset | type | field |
@@ -46,7 +43,9 @@ The file ends where the last section ends; `ms2 index-verify` checks this along 
 | 40 | u32 | CRC-32 (IEEE) of the payload |
 | 48 | (u8, u8)[12] | (column code, width) per column, in row order |
 
-Column codes: 1 len, 2 start, 3 ptr, 4 off, 5 chr, 16 psi_int, 17 psi_off, 18 phi_int, 19 phi_off, 20 plcp, 21 plcpb, 22 top_lcp, 23 int_min, 32 lcp_top, 33 lcp_min_sub, 34 lcp_spill. A width of 0 means the column takes no bits and reads as 0, as with the LF columns a tms layout omits. Column 0 says whether a move table stores lengths (`len`) or absolute starts (`start`). In a tms LF, `phi_int` holds, at each row that starts a BWT run, the φ interval that starts at that row's text position (0 at other rows), and `phi_off` has width 0, since the φ points queries read all have offset 0. A tms LF may have two more columns after the eight above, `top_lcp` and `int_min`, the LCP summaries of each row, which `build` adds to every index with phi (unless `--no-lcp-summary`) and `index-add-lcp-summary` adds to an index without them, and which `--mode phi` and `dual` read. Without summaries the section leaves them out, entry and payload alike, and a reader loads an eight-column LF section with both at width 0.
+Column codes: 1 len, 2 start, 3 ptr, 4 off, 5 chr, 16 psi_int, 17 psi_off, 18 phi_int, 19 phi_off, 20 plcp, 21 plcpb, 22 top_lcp, 23 int_min, 32 lcp_top, 33 lcp_min_sub, 34 lcp_spill. A width of 0 means the column takes no bits and reads as 0, as with the LF columns a tms layout omits. Column 0 says whether a move table stores lengths (`len`) or absolute starts (`start`). 
+
+In a "tms" LF (used by psi, phi and dual modes), `phi_int` holds, at each row that starts a BWT run, the φ interval that starts at that row's text position (0 at other rows), and `phi_off` has width 0, since the φ points queries read all have offset 0. A tms LF may have two more columns after the eight above, `top_lcp` and `int_min`, the LCP summaries of each row, which `build` adds to every index with phi (unless `--no-lcp-summary`) and `index-add-lcp-summary` adds to an index without them, and which `--mode phi` and `dual` read.
 
 Payloads:
 
@@ -57,9 +56,7 @@ Payloads:
 
 ## The sequence-ID table
 
-A tms index built from a ropebwt3 FMD may hold the FMD's sequence-ID table, ropebwt3's `.len.gz`, as the SEQ_IDS section, last in the file. Sequence k is the FMD's strings 2k (its forward strand) and 2k + 1 (its reverse complement), so the text is `C_0 $ rc(C_0) $ C_1 $ rc(C_1) $ ...`, and the lengths must give the header's n as 2 * sum(len_k + 1). `query --report smem-all` uses the table to write positions as contig, strand and forward-strand offset, as ropebwt3 does. It is added at build time by `ms2 build --seq-ids FILE`, which also checks that the BWT has two terminators per sequence. `ms2 index-add-seq-ids INDEX FILE OUT` adds it to an index already built. It copies the other sections byte for byte, at the same offsets, and checks only n, since counting the terminators would mean loading LF. A table that fits both checks but splits the text elsewhere makes a query fail when a match crosses a sequence's end.
-
-Neither changes the sections an ftab links to, so an ftab built from the index without the table serves it with the table. Earlier `ms2` binaries load such an index and ignore the section.
+A psi, phi or dual index built from a ropebwt3 FMD may hold the FMD's sequence-ID table, ropebwt3's `.len.gz`, as the SEQ_IDS section, last in the file. Sequence k is the FMD's strings 2k (its forward strand) and 2k + 1 (its reverse complement), so the text is `C_0 $ rc(C_0) $ C_1 $ rc(C_1) $ ...`, and the lengths must give the header's n as 2 * sum(len_k + 1). `query --report smem-all` uses the table to write positions as contig, strand and forward-strand offset, as ropebwt3 does. It is added at build time by `ms2 build --seq-ids FILE`, which also checks that the BWT has two terminators per sequence. `ms2 index-add-seq-ids INDEX FILE OUT` adds it to an index already built. It copies the other sections byte for byte, at the same offsets, and checks only n, since counting the terminators would mean loading LF. A table that fits both checks but splits the text elsewhere makes a query fail when a match crosses a sequence's end.
 
 ## The psi-locate layout
 
@@ -94,7 +91,7 @@ Because LF is loaded whole, a phi-mode query on a full-layout index also loads t
 
 ## Companion files
 
-An ftab (FTAB_FORMAT.md), a table of query states by k-mer that `query` takes with `--ftab`, is stored as a file of its own next to its index. Its header links it to the index through copies of the fixed fields and of the section entries its walk read.
+An ftab (FTAB_FORMAT.md) is a table of pre-computed query states, one for each of the 4^k possible k-mer.  The `query` command can be run with with `--ftab`.  The ftab is stored in a separate file, sitting alongside the index. Its header links it to the index through copies of the fixed fields and of the section entries its walk read.
 
 ## Info text
 
