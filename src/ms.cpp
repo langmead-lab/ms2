@@ -78,7 +78,7 @@ static void usage(std::ostream& os, bool advanced = false) {
        << "        phi   LF, phi, phi_inv and LCP summaries (each LF row's LCP at its\n"
        << "              head and least LCP below it); serves --mode phi, positions\n"
        << "              and SMEMs\n"
-       << "        full  everything psi and phi keep; serves every mode\n"
+       << "        full  everything psi and phi keep; serves --mode psi, phi and dual\n"
        << "        psi-locate\n"
        << "              full without phi's lengths-based form, which only walks of\n"
        << "              phi read; serves --mode psi with positions and SMEMs, and\n"

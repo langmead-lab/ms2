@@ -16,7 +16,7 @@ When a match ends, the query moves to a nearby BWT run holding the next read cha
 | `min` | LF with each row's LCP minima | `--mode min` |
 | `psi` | LF and psi | `--mode psi`, matching statistics only |
 | `phi` | LF, phi, phi_inv and per-row LCP summaries | `--mode phi`, positions and SMEMs |
-| `full` | everything `psi` and `phi` hold | every mode, including `--mode dual` |
+| `full` | everything `psi` and `phi` hold | `--mode psi`, `phi` and `dual`, with positions and SMEMs (not `--mode min`, which needs a `min` index) |
 | `psi-locate` | `full` without phi's lengths-based form | `--mode psi` with positions and SMEMs; smaller on disk than `full`, but loads as much |
 
 LF and psi are the move-structure forms of the BWT's LF mapping and its inverse; phi maps a suffix array entry to the one above it. In `min`, LCEs come from LCP values stored with each row. In `psi`, the query compares the read with the candidate suffix by stepping psi. In `phi`, whole rows' LCP minima come from the summaries and phi is walked over the current row only. `dual` races a psi walk against the phi walk.
@@ -32,9 +32,11 @@ make all
 make test
 ```
 
-`make all` builds `src/ms2` (plain `make` lists the targets), and `make test` builds it and runs its self-tests on the small fixture in `data/`, the RLBWT and per-row LCPs of a small text. In an existing clone, run `git submodule update --init` first. On macOS, build with GCC (for example `make all CXX=g++-15`), since Apple clang cannot compile part of Orbit.
+`make all` builds `src/ms2` (plain `make` lists the targets), and `make test` builds it and runs its self-tests on the small fixture in `data/`, the RLBWT and per-row LCPs of a small text. In an existing clone, run `git submodule update --init` first. On macOS, build with GCC (for example `make all CXX=g++-16`), since Apple clang cannot compile part of Orbit.
 
 The `teratools` submodule holds TeraLCP, which computes the LCP information ms2 builds from. It needs [sdsl-lite](https://github.com/simongog/sdsl-lite); see `teratools/README.md`. `src/tools/fmd2rlbwt` converts a ropebwt3 FMD to an RLBWT; build it with `make -C src/tools/fmd2rlbwt`.
+
+The `orbit` and `teratools` submodules point at forks, [BenLangmead/runperm](https://github.com/BenLangmead/runperm) (branch `v4/lib-repack-data`) and [BenLangmead/TeraTools](https://github.com/BenLangmead/TeraTools) (branch `tera/ms2-r2`), which hold the exact Orbit and TeraTools code ms2 is pinned to. The upstream projects are linked above.
 
 ## Building an index
 
@@ -68,9 +70,44 @@ This writes one line per read: its name, a tab, and its matching statistics. `--
 
 `ms2 --help` describes every option, and `ms2 --help-advanced` adds development options. The formats are described in [`src/QUERY_OUTPUT.md`](src/QUERY_OUTPUT.md), [`src/INDEX_FORMAT.md`](src/INDEX_FORMAT.md), [`src/FTAB_FORMAT.md`](src/FTAB_FORMAT.md), [`src/ORACLE_FORMAT.md`](src/ORACLE_FORMAT.md) and [`src/tools/fmd2rlbwt/FMD_RUNS.md`](src/tools/fmd2rlbwt/FMD_RUNS.md).
 
-## Citation
+## Quick example
 
-A paper describing ms2 is in preparation. Until it appears, please cite this repository, along with Orbit and TeraTools.
+This builds a `full` index of 152 *M. tuberculosis* genomes from deposited precursors and queries 60 Mb of PacBio reads. It downloads about 440 MB and peaks at about 1.5 GB of memory.
+
+```bash
+git clone --recursive https://github.com/langmead-lab/ms2.git && cd ms2 && make all
+Z=https://zenodo.org/records
+for f in bwt.heads bwt.len min phi; do curl -LO "$Z/23964220/files/precursors__mtb152__$f"; done
+for f in reads.fa truth.u32 offsets.u64; do curl -LO "$Z/23964218/files/reads__mtb152__mtb152-pacbio-60mb-v2__$f"; done
+src/ms2 build precursors__mtb152__bwt.heads precursors__mtb152__bwt.len mtb152.idx \
+    --layout full --minima precursors__mtb152__min --phi precursors__mtb152__phi
+src/ms2 query mtb152.idx reads__mtb152__mtb152-pacbio-60mb-v2__reads.fa -o ms.txt --mode dual
+```
+
+To check `ms.txt` against the deposited truth (read `qI`'s values are at `offsets[I]` to `offsets[I+1]` in `truth.u32`):
+
+```bash
+python3 - <<'EOF'
+import array
+P = 'reads__mtb152__mtb152-pacbio-60mb-v2__'
+off = array.array('Q', open(P + 'offsets.u64', 'rb').read())
+truth = array.array('I', open(P + 'truth.u32', 'rb').read())
+for line in open('ms.txt'):
+    name, ms = line.rstrip('\n').split('\t'); i = int(name[1:])
+    assert list(map(int, ms.split())) == truth[off[i]:off[i + 1]].tolist(), name
+print('ms.txt matches truth')
+EOF
+```
+
+`ms2exp.validate.ms` in [ms2-experiments](https://github.com/langmead-lab/ms2-experiments) runs the same check for every tool in the paper.
+
+## Reproducing the paper
+
+ms2 is described in "Fast Pangenome Matching Statistics in Compressed Space with Move Structures" by Nathaniel K. Brown, Ahsan Sanaullah, Pramesh Shakya, Shaojie Zhang and Ben Langmead (in preparation). The paper used the ms2 version tagged `paper-v1`. [langmead-lab/ms2-experiments](https://github.com/langmead-lab/ms2-experiments) holds the workflow, tools and results that generated the figures and tables. Its data are on Zenodo:
+
+- read sets with matching-statistics truth: [10.5281/zenodo.23964218](https://doi.org/10.5281/zenodo.23964218)
+- index build precursors (RLBWTs, minima, phi samples): [10.5281/zenodo.23964220](https://doi.org/10.5281/zenodo.23964220)
+- indexes for the legacy tools: [10.5281/zenodo.23964222](https://doi.org/10.5281/zenodo.23964222)
 
 ## License
 
@@ -78,4 +115,4 @@ ms2's own source is under the MIT license (see [LICENSE](LICENSE)), with parts t
 
 ## Acknowledgements
 
-ms2 builts on Orbit, the move-structure library by Nathaniel Brown, and TeraTools, the move-structure building library and its TeraMS component for computing matching statistics.  Its psi and phi query engine follows the design and code of TeraTools (TeraMS and TeraLCP) by Ahsan Sanaullah, Shaojie Zhang and the S. Zhang Lab at UCF, and it builds from TeraLCP's output. fmd2rlbwt uses ropebwt3's FMD reader by Heng Li.
+ms2 builds on Orbit, the move-structure library by Nathaniel Brown, and TeraTools, the move-structure building library and its TeraMS component for computing matching statistics.  Its psi and phi query engine follows the design and code of TeraTools (TeraMS and TeraLCP) by Ahsan Sanaullah, Shaojie Zhang and the S. Zhang Lab at UCF, and it builds from TeraLCP's output. fmd2rlbwt uses ropebwt3's FMD reader by Heng Li.
