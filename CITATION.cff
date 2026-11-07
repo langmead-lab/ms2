@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use ms2, please cite the paper below and the archived software."
+title: "ms2: matching statistics and SMEMs on Orbit move structures"
+version: paper-v1
+commit: 2885ee86270b4187fc45dcc69efd7de48a4aac03
+date-released: 2026-11-07
+doi: 10.5281/zenodo.24044152
+repository-code: "https://github.com/langmead-lab/ms2"
+license: MIT
+authors:
+  - family-names: Brown
+    given-names: Nathaniel K.
+  - family-names: Sanaullah
+    given-names: Ahsan
+  - family-names: Shakya
+    given-names: Pramesh
+  - family-names: Zhang
+    given-names: Shaojie
+  - family-names: Langmead
+    given-names: Ben
+preferred-citation:
+  type: unpublished
+  title: "Fast Pangenome Matching Statistics in Compressed Space with Move Structures"
+  notes: "In preparation"
+  authors:
+    - family-names: Brown
+      given-names: Nathaniel K.
+    - family-names: Sanaullah
+      given-names: Ahsan
+    - family-names: Shakya
+      given-names: Pramesh
+    - family-names: Zhang
+      given-names: Shaojie
+    - family-names: Langmead
+      given-names: Ben
