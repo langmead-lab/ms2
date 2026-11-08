@@ -21,6 +21,8 @@ When a match ends, the query moves to a nearby BWT run holding the next read cha
 
 LF and psi are the move-structure forms of the BWT's LF mapping and its inverse; phi maps a suffix array entry to the one above it. In `min`, LCEs come from LCP values stored with each row. In `psi`, the query compares the read with the candidate suffix by stepping psi. In `phi`, whole rows' LCP minima come from the summaries and phi is walked over the current row only. `dual` races a psi walk against the phi walk.
 
+Some names in the code differ from the paper's. The paper calls the four query modes ms2-min, ms2-psi, ms2-phi and ms2-dual. When a match ends and the query moves to another BWT run, the paper calls that step a recovery; `ms2 --help`, the source and the file formats call it a reposition. Source and test names starting with `tms` (for "TeraMS-style", as in `tms_query.hpp` and `tms_test`) belong to the indexes that hold psi or phi, that is every layout but `min`. `src/INDEX_FORMAT.md` calls a `min` index an "ms" index and the others "tms" indexes.
+
 ## Building
 
 ms2 needs a C++17 compiler and zlib. Clone with the submodules:
@@ -72,7 +74,7 @@ This writes one line per read: its name, a tab, and its matching statistics. `--
 
 ## Quick example
 
-This builds a `full` index of 152 *M. tuberculosis* genomes from deposited precursors and queries 60 Mb of PacBio reads. It downloads about 440 MB and peaks at about 1.5 GB of memory.
+This builds a `full` index of the mtb152 pangenome from deposited precursors. Despite its name, the index holds 144 of the 152 *M. tuberculosis* genomes of that set; the other 8 are held out as queries. The example queries 60 Mb of PacBio reads. It downloads about 440 MB and peaks at about 1.5 GB of memory.
 
 ```bash
 git clone --recursive https://github.com/langmead-lab/ms2.git && cd ms2 && make all
