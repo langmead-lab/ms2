@@ -1,0 +1,82 @@
+# Builds ms2 and runs its self-tests on every push to main and every pull
+# request.  Linux covers a range of GCC versions; macOS uses Homebrew GCC,
+# since Apple clang cannot compile part of Orbit.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux g++-${{ matrix.gcc }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        gcc: [12, 14]
+    env:
+      CXX: g++-${{ matrix.gcc }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+      - name: Compiler version
+        run: $CXX --version
+      - name: Build
+        run: make all CXX=$CXX
+      - name: Self-tests
+        run: make test CXX=$CXX
+      - name: Thread and block-size identity
+        run: make -C src test-threads CXX=$CXX
+      - name: Stored ftabs
+        run: make -C src test-ftab CXX=$CXX
+      - name: Read chunking under ASan and UBSan
+        run: make -C src test-reader CXX=$CXX
+
+  # The benchmark and statistics builds compile code behind their own
+  # preprocessor flags.  They run with assertions off, so the test commands
+  # refuse to run in them; building them keeps that code compiling.
+  variants:
+    name: Build variants
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+      - name: Build ms2-bench, ms2-stats, ms2-steps, ms2-replog and tms_chain_bench
+        run: make -C src -j4 ms2-bench ms2-stats ms2-steps ms2-replog tms_chain_bench CXX=$CXX
+      - name: Build fmd2rlbwt
+        run: make -C src/tools/fmd2rlbwt
+
+  macos:
+    name: macOS Homebrew GCC
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+      - name: Find Homebrew GCC
+        run: |
+          brew list gcc > /dev/null 2>&1 || brew install gcc
+          cxx=$(ls "$(brew --prefix)"/bin/g++-[0-9]* | sort -V | tail -1)
+          echo "CXX=$cxx" >> "$GITHUB_ENV"
+          "$cxx" --version
+      - name: Build
+        run: make all CXX=$CXX
+      - name: Self-tests
+        run: make test CXX=$CXX
