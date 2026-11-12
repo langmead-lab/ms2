@@ -105,7 +105,7 @@ EOF
 
 ## Reproducing the paper
 
-ms2 is described in "Fast Pangenome Matching Statistics in Compressed Space with Move Structures" by Nathaniel K. Brown, Ahsan Sanaullah, Pramesh Shakya, Shaojie Zhang and Ben Langmead (in preparation). The paper used the ms2 version tagged `paper-v1`, which is archived, with its submodules, at [10.5281/zenodo.24044152](https://doi.org/10.5281/zenodo.24044152) and attached to the [paper-v1 release](https://github.com/langmead-lab/ms2/releases/tag/paper-v1). [langmead-lab/ms2-experiments](https://github.com/langmead-lab/ms2-experiments) holds the workflow, tools and results that generated the figures and tables. Its data are on Zenodo:
+ms2 is described in "Fast Pangenome Matching Statistics in Compressed Space with Move Structures" by Nathaniel K. Brown, Ahsan Sanaullah, Pramesh Shakya, Shaojie Zhang and Ben Langmead ([bioRxiv](https://www.biorxiv.org/content/10.64898/2026.11.10.765781v1)). The paper used the ms2 version tagged `paper-v1`, which is archived, with its submodules, at [10.5281/zenodo.24044152](https://doi.org/10.5281/zenodo.24044152) and attached to the [paper-v1 release](https://github.com/langmead-lab/ms2/releases/tag/paper-v1). [langmead-lab/ms2-experiments](https://github.com/langmead-lab/ms2-experiments) holds the workflow, tools and results that generated the figures and tables. Its data are on Zenodo:
 
 - read sets with matching-statistics truth: [10.5281/zenodo.23964218](https://doi.org/10.5281/zenodo.23964218)
 - index build precursors (RLBWTs, minima, phi samples): [10.5281/zenodo.23964220](https://doi.org/10.5281/zenodo.23964220)
